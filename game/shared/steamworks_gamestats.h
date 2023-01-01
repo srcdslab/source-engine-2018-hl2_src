@@ -72,10 +72,14 @@ public:
 
 	// Called each frame before entities think
 	virtual void FrameUpdatePreEntityThink() {}
+
+#ifndef	NO_STEAM
 	// called after entities think
 #if defined ( GAME_DLL )
 	virtual void FrameUpdatePostEntityThink();
 #endif
+#endif
+
 	virtual void PreClientUpdate() {}
 
 	void StartSession();

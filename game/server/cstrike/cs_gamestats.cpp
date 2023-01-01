@@ -1179,12 +1179,14 @@ void CCSGameStats::Event_MoneySpent( CCSPlayer* pPlayer, int moneySpent, const c
 	if ( pPlayer && moneySpent > 0)
 	{
 		IncrementStat(pPlayer, CSSTAT_MONEY_SPENT, moneySpent);
+#if !defined(_GAMECONSOLE) && !defined(NO_STEAM)
 		if ( pItemName && !pPlayer->IsBot() )
 		{
 			CSteamID steamIDForBuyer;
 			pPlayer->GetSteamID( &steamIDForBuyer );
 			m_MarketPurchases.AddToTail( new SMarketPurchases( steamIDForBuyer.ConvertToUint64(), moneySpent, pItemName ) );
 		}
+#endif
 	}
 }
 

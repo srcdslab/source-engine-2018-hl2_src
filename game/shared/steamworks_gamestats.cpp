@@ -104,9 +104,11 @@ void ServerSessionIDChangeCallback( IConVar *pConVar, const char *pOldString, fl
 //-----------------------------------------------------------------------------
 time_t CSteamWorksGameStatsUploader::GetTimeSinceEpoch( void )
 {
-	if ( steamapicontext && steamapicontext->SteamUtils() )
+#if !defined(NO_STEAM)
+	if (steamapicontext && steamapicontext->SteamUtils())
 		return steamapicontext->SteamUtils()->GetServerRealTime();
 	else
+#endif
 	{
 		// Default to system time.
 		time_t aclock;
@@ -519,7 +521,7 @@ void CSteamWorksGameStatsUploader::ClearSessionID()
 	steamworks_sessionid_server.SetValue( 0 );
 }
 
-#ifndef	NO_STEAM
+#if !defined(NO_STEAM)
 
 //-----------------------------------------------------------------------------
 // Purpose: The steam callback used to get our session IDs.
@@ -822,12 +824,14 @@ EResult	CSteamWorksGameStatsUploader::WriteOptionalIntToTable( KeyValues *pKV, c
 //-----------------------------------------------------------------------------
 bool CSteamWorksGameStatsUploader::AccessToSteamAPI( void )
 {
+#if !defined(NO_STEAM)
 #ifdef	GAME_DLL
 	return ( steamgameserverapicontext && steamgameserverapicontext->SteamGameServer() && g_pSteamClientGameServer && steamgameserverapicontext->SteamGameServerUtils() );
 #elif	CLIENT_DLL
 	return ( steamapicontext && steamapicontext->SteamUser() && steamapicontext->SteamUser()->BLoggedOn() && steamapicontext->SteamFriends() && steamapicontext->SteamMatchmaking() );
 #endif
-	return false;
+#endif  // !NO_STEAM
+        return false;
 }
 
 //-----------------------------------------------------------------------------
@@ -1095,7 +1099,7 @@ int CSteamWorksGameStatsUploader::GetFriendCountInGame()
 	// Get the number of steam friends in game
 	int friendsInOurGame = 0;
 
-
+#if !defined(NO_STEAM)
 	// Do we have access to the steam API?
 	if ( AccessToSteamAPI() )
 	{
@@ -1131,6 +1135,7 @@ int CSteamWorksGameStatsUploader::GetFriendCountInGame()
 			}
 		}
 	}
+#endif  // !NO_STEAM
 
 	return friendsInOurGame;
 }
