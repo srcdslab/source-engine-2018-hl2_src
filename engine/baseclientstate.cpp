@@ -956,12 +956,12 @@ bool CBaseClientState::ProcessConnectionlessPacket( netpacket_t *packet )
 										bGSSecure = ( msg.ReadByte() == 1 );
 									}
 									// The host can disable access to secure servers if you load unsigned code (mods, plugins, hacks)
-									if ( bGSSecure && !Host_IsSecureServerAllowed() )
-									{
-										COM_ExplainDisconnection( true, "#GameUI_ServerInsecure" );
-										Disconnect( "#GameUI_ServerInsecure", true );
-										return false;
-									}
+									// if ( bGSSecure && !Host_IsSecureServerAllowed() )
+									// {
+									// 	COM_ExplainDisconnection( true, "#GameUI_ServerInsecure" );
+									// 	Disconnect( "#GameUI_ServerInsecure", true );
+									// 	return false;
+									// }
 								}
 								SendConnectPacket( challenge, authprotocol, unGSSteamID, bGSSecure );
 							}

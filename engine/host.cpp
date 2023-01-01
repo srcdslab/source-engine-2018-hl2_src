@@ -4081,8 +4081,9 @@ bool DLL_LOCAL Host_AllowLoadModule( const char *pFilename, const char *pPathID,
 			}
 			else
 			{
-				Warning("Steam is not active, running in -insecure mode.\n");
-				Host_DisallowSecureServers();
+				// Warning("Steam is not active, running in -insecure mode.\n");
+				// Host_DisallowSecureServers();
+				return true;
 			}
 		}
 		else
