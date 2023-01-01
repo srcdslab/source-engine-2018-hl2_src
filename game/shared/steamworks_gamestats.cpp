@@ -836,6 +836,7 @@ bool CSteamWorksGameStatsUploader::AccessToSteamAPI( void )
 //-----------------------------------------------------------------------------
 ISteamGameStats* CSteamWorksGameStatsUploader::GetInterface( void )
 {
+#if !defined(NO_STEAM)
 	HSteamUser hSteamUser = 0;
 	HSteamPipe hSteamPipe = 0;
 
@@ -868,6 +869,8 @@ ISteamGameStats* CSteamWorksGameStatsUploader::GetInterface( void )
 	{
 		return (ISteamGameStats*)SteamClient()->GetISteamGenericInterface( hSteamUser, hSteamPipe, STEAMGAMESTATS_INTERFACE_VERSION );
 	}
+#endif  // !NO_STEAM
+
 	// If we haven't returned already, then we can't get access to the interface
 	return NULL;
 }
