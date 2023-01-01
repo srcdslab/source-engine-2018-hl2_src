@@ -407,6 +407,7 @@ devtools/bin/vpc.pdb
 *.vcxproj.vpc_crc
 *.vcxproj.FileListAbsolute.txt
 *.vpc.sentinel
+*.vpc_cache
 *.sln
 
 # Build artifacts
@@ -421,3 +422,14 @@ devtools/bin/vpc.pdb
 ValveETWProviderEvents*
 gcsdk/generated_proto/
 
+# OSX/Linux build products
+*.mak
+*.mak.vpc_crc
+*.xcodeproj/
+obj*/
+!devtools/*.mak
+!utils/smdlexp/smdlexp.mak
+*.a
+*.a.dbg
+*.project
+src/tools/runtime/linux/steamrt_scout_i386
