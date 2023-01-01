@@ -64,7 +64,7 @@ extern void longjmp( jmp_buf, int ) __attribute__((noreturn));
 #include "jpeglib/jpeglib.h"
 #undef JPEGLIB_USE_STDIO
 
-#include "libpng/png.h"
+#include "pnglib/png.h"
 
 #include <setjmp.h>
 

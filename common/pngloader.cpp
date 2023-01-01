@@ -17,8 +17,8 @@
 extern void longjmp( jmp_buf, int ) __attribute__((noreturn));
 #endif
 
-#include "libpng/png.h"
-#include "libpng/pngstruct.h"
+#include "pnglib/png.h"
+#include "pnglib/pngstruct.h"
 #include "tier0/dbg.h"
 
 //

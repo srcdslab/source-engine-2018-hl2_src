@@ -594,6 +594,7 @@ void CSteamWorksGameStatsUploader::Steam_OnSteamSessionInfoClosed( GameStatsSess
 // Purpose: Per frame think. Used to periodically check if we have queued operations.
 // For example: we may request a session id before steam is ready.
 //-----------------------------------------------------------------------------
+#if defined ( GAME_DLL )
 void CSteamWorksGameStatsUploader::FrameUpdatePostEntityThink()
 {
 	if ( !m_ServiceTicking )
@@ -616,8 +617,9 @@ void CSteamWorksGameStatsUploader::FrameUpdatePostEntityThink()
 	// If we had nothing to resend, stop ticking.
 	m_ServiceTicking = false;
 }
+#endif // GAME_DLL
 
-#endif
+#endif // !NO_STEAM
 
 //-----------------------------------------------------------------------------
 // Purpose: Opens a session: requests the session id, etc.
