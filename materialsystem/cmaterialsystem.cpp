@@ -65,6 +65,11 @@ static ConVar mat_dxlevel( "mat_dxlevel", "92", 0, "", true, 90, true, 92, NULL 
 static ConVar mat_dxlevel( "mat_dxlevel", "0", 0, "Current DirectX Level. Competitive play requires at least mat_dxlevel 90", false, 0, false, 0, true, 90, false, 0, NULL  );
 #endif
 
+ConVar mat_queue_mode_force_allow(
+    "mat_queue_mode_force_allow", IsPS3() ? "1" : "0", FCVAR_DEVELOPMENTONLY,
+    "Whether QMS can be enabled on single threaded CPU");
+ConVar mat_queue_priority("mat_queue_priority", "1", FCVAR_NONE);
+
 IMaterialInternal *g_pErrorMaterial = NULL;
 
 CreateInterfaceFn g_fnMatSystemConnectCreateInterface = NULL;  
@@ -1053,7 +1058,7 @@ bool CMaterialSystem::AllowThreading( bool bAllow, int nServiceThread )
 
 	bool bOldAllow = m_bAllowQueuedRendering;
 
-	if ( GetCPUInformation()->m_nPhysicalProcessors >= 2 )
+	if ( GetCPUInformation()->m_nPhysicalProcessors >= 2 || mat_queue_mode_force_allow.GetBool() )
 	{
 		m_bAllowQueuedRendering = bAllow;
 		bool bQueued = m_IdealThreadMode != MATERIAL_SINGLE_THREADED;
@@ -3742,6 +3747,11 @@ void CMaterialSystem::EndFrame( void )
 				{
 					m_pActiveAsyncJob->SetServiceThread( m_nServiceThread );
 				}
+			}
+
+			if (mat_queue_priority.GetBool())
+			{
+				m_pActiveAsyncJob->SetFlags(m_pActiveAsyncJob->GetFlags() | JF_QUEUE);
 			}
 
 			IThreadPool *pThreadPool = CreateMatQueueThreadPool();
