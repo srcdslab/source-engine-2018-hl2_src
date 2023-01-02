@@ -401,7 +401,7 @@ public:
 
 		case MDLCACHE_ANIMBLOCK:
 			// anim blocks have their own section
-			return m_pAnimBlockCacheSection;
+			return m_pAnimBlocksCacheSection;
 
 		default:
 			// everybody else
@@ -420,6 +420,8 @@ public:
 
 	virtual void BeginLock();
 	virtual void EndLock();
+	virtual void BeginCoarseLock();
+	virtual void EndCoarseLock();
 	virtual int *GetFrameUnlockCounterPtrOLD();
 	virtual int *GetFrameUnlockCounterPtr( MDLCacheDataType_t type );
 
@@ -531,16 +533,17 @@ private:
 	// Processes raw data (from an I/O source) into the cache. Sets the cache state as expected for bad data.
 	bool ProcessDataIntoCache( MDLHandle_t handle, MDLCacheDataType_t type, int iAnimBlock, void *pData, int nDataSize, bool bDataValid );
 
-	void BreakFrameLock( bool bModels = true, bool bMesh = true );
+	void BreakFrameLock(bool bModels = true, bool bMesh = true, bool bAnimBlock = true );
 	void RestoreFrameLock();
 
 private:
 	IDataCacheSection *m_pModelCacheSection;
 	IDataCacheSection *m_pMeshCacheSection;
-	IDataCacheSection *m_pAnimBlockCacheSection;
+	IDataCacheSection *m_pAnimBlocksCacheSection;
 
 	int m_nModelCacheFrameLocks;
 	int m_nMeshCacheFrameLocks;
+	int m_nAnimBlockCacheFrameLocks;
 
 	CUtlDict< studiodata_t*, MDLHandle_t > m_MDLDict;
 
@@ -590,9 +593,10 @@ CMDLCache::CMDLCache() : BaseClass( false )
 	m_pCacheNotify = NULL;
 	m_pModelCacheSection = NULL;
 	m_pMeshCacheSection = NULL;
-	m_pAnimBlockCacheSection = NULL;
+	m_pAnimBlocksCacheSection = NULL;
 	m_nModelCacheFrameLocks = 0;
 	m_nMeshCacheFrameLocks = 0;
+	m_nAnimBlockCacheFrameLocks = 0;
 }
 
 
@@ -693,12 +697,12 @@ InitReturnVal_t CMDLCache::Init()
 		m_pMeshCacheSection = g_pDataCache->AddSection( this, MODEL_CACHE_MESH_SECTION_NAME, limits );
 	}
 
-	if ( !m_pAnimBlockCacheSection )
+	if ( !m_pAnimBlocksCacheSection )
 	{
 		// 360 tuned to worst case, ep_outland_12a, less than 6 MB is not a viable working set
 		unsigned int animBlockLimit = IsX360() ? 6*1024*1024 : (unsigned)-1;
 		DataCacheLimits_t limits( animBlockLimit, (unsigned)-1, 0, 0 );
-		m_pAnimBlockCacheSection = g_pDataCache->AddSection( this, MODEL_CACHE_ANIMBLOCK_SECTION_NAME, limits );
+		m_pAnimBlocksCacheSection = g_pDataCache->AddSection( this, MODEL_CACHE_ANIMBLOCK_SECTION_NAME, limits );
 	}
 
 	if ( IsX360() )
@@ -750,10 +754,10 @@ void CMDLCache::Shutdown()
 		}
 	}
 
-	if ( m_pAnimBlockCacheSection )
+	if ( m_pAnimBlocksCacheSection )
 	{
 		g_pDataCache->RemoveSection( MODEL_CACHE_ANIMBLOCK_SECTION_NAME );
-		m_pAnimBlockCacheSection = NULL;
+		m_pAnimBlocksCacheSection = NULL;
 	}
 
 	BaseClass::Shutdown();
@@ -1680,9 +1684,11 @@ bool CMDLCache::BuildHardwareData( MDLHandle_t handle, studiodata_t *pStudioData
 
 	Assert( GetVertexData( handle ) );
 
+	BeginCoarseLock();
 	BeginLock();
 	bool bLoaded = g_pStudioRender->LoadModel( pStudioHdr, pVtxHdr, &pStudioData->m_HardwareData );
 	EndLock();
+	EndCoarseLock();
 
 	if ( bLoaded )
 	{
@@ -2336,10 +2342,38 @@ bool CMDLCache::GetItemName( DataCacheClientID_t clientId, const void *pItem, ch
 //-----------------------------------------------------------------------------
 // Flushes all data
 //-----------------------------------------------------------------------------
+void CMDLCache::BeginCoarseLock()
+{
+	if (IsGameConsole())
+	{
+		m_pModelCacheSection->BeginFrameLocking();
+		m_pMeshCacheSection->BeginFrameLocking();
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Flushes all data
+//-----------------------------------------------------------------------------
+void CMDLCache::EndCoarseLock()
+{
+	if (IsGameConsole())
+	{
+		m_pModelCacheSection->EndFrameLocking();
+		m_pMeshCacheSection->EndFrameLocking();
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Flushes all data
+//-----------------------------------------------------------------------------
 void CMDLCache::BeginLock()
 {
-	m_pModelCacheSection->BeginFrameLocking();
-	m_pMeshCacheSection->BeginFrameLocking();
+	if (!IsGameConsole())
+	{
+		m_pModelCacheSection->BeginFrameLocking();
+		m_pMeshCacheSection->BeginFrameLocking();
+	}
+	m_pAnimBlocksCacheSection->BeginFrameLocking();
 }
 
 //-----------------------------------------------------------------------------
@@ -2347,15 +2381,19 @@ void CMDLCache::BeginLock()
 //-----------------------------------------------------------------------------
 void CMDLCache::EndLock()
 {
-	m_pModelCacheSection->EndFrameLocking();
-	m_pMeshCacheSection->EndFrameLocking();
+	if (!IsGameConsole())
+	{
+		m_pModelCacheSection->EndFrameLocking();
+		m_pMeshCacheSection->EndFrameLocking();
+	}
+	m_pAnimBlocksCacheSection->EndFrameLocking();
 }
 
 
 //-----------------------------------------------------------------------------
 //
 //-----------------------------------------------------------------------------
-void CMDLCache::BreakFrameLock( bool bModels, bool bMesh )
+void CMDLCache::BreakFrameLock(bool bModels, bool bMesh, bool bAnimBlock)
 {
 	if ( bModels )
 	{
@@ -2384,6 +2422,17 @@ void CMDLCache::BreakFrameLock( bool bModels, bool bMesh )
 		}
 	}
 
+	if (bAnimBlock)
+	{
+		if (m_pAnimBlocksCacheSection->IsFrameLocking())
+		{
+			Assert(!m_nAnimBlockCacheFrameLocks);
+			m_nAnimBlockCacheFrameLocks = 0;
+			do {
+				m_nAnimBlockCacheFrameLocks++;
+			} while (m_pAnimBlocksCacheSection->EndFrameLocking());
+		}
+	}
 }
 
 void CMDLCache::RestoreFrameLock()
@@ -2397,6 +2446,11 @@ void CMDLCache::RestoreFrameLock()
 	{
 		m_pMeshCacheSection->BeginFrameLocking();
 		m_nMeshCacheFrameLocks--;
+	}
+	while (m_nAnimBlockCacheFrameLocks)
+	{
+		m_pAnimBlocksCacheSection->BeginFrameLocking();
+		m_nAnimBlockCacheFrameLocks--;
 	}
 }
 

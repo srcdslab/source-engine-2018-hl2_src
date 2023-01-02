@@ -67,6 +67,17 @@
 static ConVar cl_SetupAllBones( "cl_SetupAllBones", "0" );
 ConVar r_sequence_debug( "r_sequence_debug", "" );
 
+// [mariod] - am comparing two optimisations to remove what seems like unnecessary bonesetup, particularly during input/aiment code
+// method 1. just use stale data in setupbones, by ignoring the condition that enables the path to recalc them
+// method 2. Only allow the invalidation of bonecaches to happen during specific sections of the frame
+// method 1 uses Enable/DisableNewBoneSetupRequest over critical sections
+// method 2 uses Enable/DisableInvalidateBoneCache
+// method 2 is enabled, method 1 disabled for now, needs more thorough testing, but I can't see issues on CS:GO with this config
+// Have spoken to Yahn about this, and he seems to agree that either the invalidatebonecache calls shouldn't be there,
+// and/or the use of stale data during input code should be fine
+bool C_BaseAnimating::s_bEnableInvalidateBoneCache	= true;
+bool C_BaseAnimating::s_bEnableNewBoneSetupRequest	= true;
+
 // If an NPC is moving faster than this, he should play the running footstep sound
 const float RUN_SPEED_ESTIMATE_SQR = 150.0f * 150.0f;
 
@@ -85,6 +96,8 @@ static ConVar dbganimmodel( "dbganimmodel", "" );
 	static CInterlockedInt dbg_bonestack_reentrant_count = 0;
 #endif // STAGING_ONLY
 
+static bool g_bInThreadedBoneSetup;
+
 mstudioevent_t *GetEventIndexForSequence( mstudioseqdesc_t &seqdesc );
 
 C_EntityDissolve *DissolveEffect( C_BaseEntity *pTarget, float flTime );
@@ -93,6 +106,7 @@ bool NPC_IsImportantNPC( C_BaseAnimating *pAnimating );
 void VCollideWireframe_ChangeCallback( IConVar *pConVar, char const *pOldString, float flOldValue );
 
 ConVar vcollide_wireframe( "vcollide_wireframe", "0", FCVAR_CHEAT, "Render physics collision models in wireframe", VCollideWireframe_ChangeCallback );
+ConVar enable_skeleton_draw( "enable_skeleton_draw", "0", FCVAR_CHEAT, "Render skeletons in wireframe" );
 
 bool C_AnimationLayer::IsActive( void )
 {
@@ -657,6 +671,11 @@ static unsigned long	g_iModelBoneCounter = 0;
 CUtlVector<C_BaseAnimating *> g_PreviousBoneSetups;
 static unsigned long	g_iPreviousBoneCounter = (unsigned)-1;
 
+unsigned int g_nNumBonesSetupBlendingRulesOnly;
+unsigned int g_nNumBonesSetupBlendingRulesOnlyTemp;
+unsigned int g_nNumBonesSetupAll;
+unsigned int g_nNumBonesSetupAllTemp;
+
 class C_BaseAnimatingGameSystem : public CAutoGameSystem
 {
 	void LevelShutdownPostEntity()
@@ -679,6 +698,10 @@ C_BaseAnimating::C_BaseAnimating() :
 	m_iv_flPoseParameter( "C_BaseAnimating::m_iv_flPoseParameter" ),
 	m_iv_flEncodedController("C_BaseAnimating::m_iv_flEncodedController")
 {
+	m_nLastNonSkippedFrame = 0;
+
+	m_nCustomBlendingRuleMask = -1;
+
 	m_vecForce.Init();
 	m_nForceBone = -1;
 	
@@ -700,6 +723,7 @@ C_BaseAnimating::C_BaseAnimating() :
 	m_iMostRecentModelBoneCounter = 0xFFFFFFFF;
 	m_iMostRecentBoneSetupRequest = g_iPreviousBoneCounter - 1;
 	m_flLastBoneSetupTime = -FLT_MAX;
+	m_pNextForThreadedBoneSetup = NULL;
 
 	m_vecPreRagdollMins = vec3_origin;
 	m_vecPreRagdollMaxs = vec3_origin;
@@ -749,6 +773,12 @@ C_BaseAnimating::C_BaseAnimating() :
 	Q_memset(&m_mouth, 0, sizeof(m_mouth));
 	m_flCycle = 0;
 	m_flOldCycle = 0;
+
+	for ( int i=0; i<MAXSTUDIOBONES; i++ )
+	{
+		m_pos_cached[i].Init();
+		m_q_cached[i].Init();
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -756,6 +786,8 @@ C_BaseAnimating::C_BaseAnimating() :
 //-----------------------------------------------------------------------------
 C_BaseAnimating::~C_BaseAnimating()
 {
+	Assert( !g_bInThreadedBoneSetup );
+
 	int i = g_PreviousBoneSetups.Find( this );
 	if ( i != -1 )
 		g_PreviousBoneSetups.FastRemove( i );
@@ -1460,7 +1492,7 @@ void C_BaseAnimating::GetCachedBoneMatrix( int boneIndex, matrix3x4_t &out )
 //-----------------------------------------------------------------------------
 void C_BaseAnimating::BuildTransformations( CStudioHdr *hdr, Vector *pos, Quaternion *q, const matrix3x4_t &cameraTransform, int boneMask, CBoneBitList &boneComputed )
 {
-	VPROF_BUDGET( "C_BaseAnimating::BuildTransformations", VPROF_BUDGETGROUP_CLIENT_ANIMATION );
+	VPROF_BUDGET( "C_BaseAnimating::BuildTransformations", ( !g_bInThreadedBoneSetup ) ? VPROF_BUDGETGROUP_CLIENT_ANIMATION : "Client_Animation_Threaded" );
 
 	if ( !hdr )
 		return;
@@ -2723,75 +2755,267 @@ CMouthInfo *C_BaseAnimating::GetMouth( void )
 ConVar cl_warn_thread_contested_bone_setup("cl_warn_thread_contested_bone_setup", "0" );
 #endif
 
-// Marked this developmentonly because it currently crashes, and users are enabling it and complaining because of
-// course.  Once this actually works it should just be FCVAR_INTERNAL_USE.
-ConVar cl_threaded_bone_setup("cl_threaded_bone_setup", "0", FCVAR_DEVELOPMENTONLY | FCVAR_INTERNAL_USE,
-                              "Enable parallel processing of C_BaseAnimating::SetupBones()" );
+//// Marked this developmentonly because it currently crashes, and users are enabling it and complaining because of
+//// course.  Once this actually works it should just be FCVAR_INTERNAL_USE.
+//ConVar cl_threaded_bone_setup("cl_threaded_bone_setup", "0", FCVAR_DEVELOPMENTONLY | FCVAR_INTERNAL_USE,
+//                              "Enable parallel processing of C_BaseAnimating::SetupBones()" );
+
+// 7LS - turning off threaded bones on X360 until we find out why there is a
+// perf hit, even though we are running the bonesetups in parallel!
+ConVar cl_threaded_bone_setup("cl_threaded_bone_setup", IsX360() ? "1" : (IsPS3() ? "2" : "0"), FCVAR_NONE, "Enable parallel processing of bones");
+
 
 //-----------------------------------------------------------------------------
 // Purpose: Do the default sequence blending rules as done in HL1
 //-----------------------------------------------------------------------------
 
-static void SetupBonesOnBaseAnimating( C_BaseAnimating *&pBaseAnimating )
+#ifdef DEBUG_BONE_SETUP_THREADING
+CThreadLocalInt<> *pCount;
+#endif
+
+void C_BaseAnimating::SetupBonesOnBaseAnimating( C_BaseAnimating *&pBaseAnimating )
 {
-	if ( !pBaseAnimating->GetMoveParent() )
-		pBaseAnimating->SetupBones( NULL, -1, -1, gpGlobals->curtime );
+	C_BaseAnimating *pCurrent = pBaseAnimating;
+	C_BaseAnimating *pNext;
+	while ( pCurrent )
+	{
+		pNext = pCurrent->m_pNextForThreadedBoneSetup;
+		pCurrent->m_pNextForThreadedBoneSetup = NULL;
+		pCurrent->SetupBones( NULL, -1, -1, gpGlobals->curtime );
+		pCurrent = pNext;
+	}
+
+#ifdef DEBUG_BONE_SETUP_THREADING
+	(*pCount)++;
+#endif
 }
 
 static void PreThreadedBoneSetup()
 {
+	mdlcache->BeginCoarseLock();
 	mdlcache->BeginLock();
 }
 
 static void PostThreadedBoneSetup()
 {
 	mdlcache->EndLock();
+	mdlcache->EndCoarseLock();
+#ifdef DEBUG_BONE_SETUP_THREADING
+ 	Msg( "  %x done, %d\n", ThreadGetCurrentId(), (int)(*pCount) );
+ 	(*pCount) = 0;
+#endif
 }
 
-static bool g_bInThreadedBoneSetup;
 static bool g_bDoThreadedBoneSetup;
+IThreadPool *g_pBoneSetupThreadPool;
 
 void C_BaseAnimating::InitBoneSetupThreadPool()
 {
-}
+#ifdef DEBUG_BONE_SETUP_THREADING
+	pCount = new CThreadLocalInt<>;
+#endif
+#ifdef _X360
+	if ( g_pAlternateThreadPool )
+	{
+		g_pBoneSetupThreadPool = g_pAlternateThreadPool;
+	}
+	else
+#endif
+	{
+		g_pBoneSetupThreadPool = g_pThreadPool;
+	}
+
+	// setup SPU bonejobs
+#if defined( _PS3 )
+	g_pBoneJobs->Init();
+#endif
+}				 
 
 void C_BaseAnimating::ShutdownBoneSetupThreadPool()
 {
 }
 
+void C_BaseAnimating::MarkForThreadedBoneSetup()
+{
+//	SNPROF_ANIM( "C_BaseAnimating::MarkForThreadedBoneSetup" );
+
+	if ( g_bDoThreadedBoneSetup && !g_bInThreadedBoneSetup && m_iMostRecentBoneSetupRequest != g_iPreviousBoneCounter )
+	{
+		if ( !IsViewModel() )
+		{
+			// This function is protected by m_BoneSetupLock (see SetupBones)
+			if ( m_iMostRecentBoneSetupRequest != g_iPreviousBoneCounter )
+			{
+//				SNPROF_ANIM( "C_BaseAnimating::MarkForThreadedBoneSetup_AddToTail" );
+
+#ifdef DEBUG_BONESETUP_THREADVSNONTHREAD
+				Msg("MARK FOR THREADED: %x\n", this );
+#endif
+
+				m_iMostRecentBoneSetupRequest = g_iPreviousBoneCounter;
+				LOCAL_THREAD_LOCK();
+				Assert( g_PreviousBoneSetups.Find( this ) == -1 );
+				g_PreviousBoneSetups.AddToTail( this );
+			}
+		}
+	}
+
+}
+
 void C_BaseAnimating::ThreadedBoneSetup()
 {
-	g_bDoThreadedBoneSetup = cl_threaded_bone_setup.GetBool();
+#ifdef _PS3
+    g_bDoThreadedBoneSetup = 1;
+#else
+	g_bDoThreadedBoneSetup = ( g_pBoneSetupThreadPool && g_pBoneSetupThreadPool->NumThreads() && cl_threaded_bone_setup.GetInt() );
+#endif
 	if ( g_bDoThreadedBoneSetup )
 	{
 		int nCount = g_PreviousBoneSetups.Count();
+#if defined( _PS3 )
+		if ( nCount > 0 )
+#else
 		if ( nCount > 1 )
+#endif
 		{
+			VPROF_BUDGET( "C_BaseAnimating::ThreadedBoneSetup", "Client_Animation_Threaded" );
+
+#ifdef DEBUG_BONE_SETUP_THREADING
+			Msg( "{\n" );
+#endif
+			// This loop is here rather than the mark function so we don't have to worry about the list being threadsafe, or worry about entity destruction
+#ifdef _DEBUG
+			CUtlVector<C_BaseAnimating *> test;
+			test.AddVectorToTail( g_PreviousBoneSetups );
+#endif
+			for ( int i = g_PreviousBoneSetups.Count() - 1; i >= 0; i-- )
+			{
+				C_BaseAnimating *pAnimating = g_PreviousBoneSetups[i];
+				C_BaseAnimating *pDependancy;
+				if ( (pDependancy = pAnimating->GetBoneSetupDependancy()) != NULL )
+				{
+					Assert( pAnimating->m_pNextForThreadedBoneSetup == NULL );
+					C_BaseAnimating *pNextDependancy;
+					while ( (pNextDependancy = pDependancy->GetBoneSetupDependancy()) != NULL )
+					{
+						pDependancy = pNextDependancy;
+					}
+					
+					pAnimating->m_pNextForThreadedBoneSetup = pDependancy->m_pNextForThreadedBoneSetup;
+					pDependancy->m_pNextForThreadedBoneSetup = pAnimating;
+					g_PreviousBoneSetups.FastRemove( i );
+					if ( pDependancy->m_iMostRecentBoneSetupRequest != g_iPreviousBoneCounter )
+					{
+						Assert( g_PreviousBoneSetups.Find( pDependancy ) == -1 );
+						pDependancy->m_iMostRecentBoneSetupRequest = g_iPreviousBoneCounter;
+						g_PreviousBoneSetups.AddToTail( pDependancy );
+					}
+				}
+			}
+			nCount = g_PreviousBoneSetups.Count();
+
 			g_bInThreadedBoneSetup = true;
+			if ( cl_threaded_bone_setup.GetInt() == 1 )
+			{
+				CParallelProcessor<C_BaseAnimating *, CFuncJobItemProcessor<C_BaseAnimating *>> processor("C_BaseAnimating::ThreadedBoneSetup");
+				processor.m_ItemProcessor.Init( &SetupBonesOnBaseAnimating, &PreThreadedBoneSetup, &PostThreadedBoneSetup );
+				processor.Run( g_PreviousBoneSetups.Base(), nCount, INT_MAX, g_pBoneSetupThreadPool );
+			}
+			else
+			{
 
-			ParallelProcess( "C_BaseAnimating::ThreadedBoneSetup", g_PreviousBoneSetups.Base(), nCount, &SetupBonesOnBaseAnimating, &PreThreadedBoneSetup, &PostThreadedBoneSetup );
-
+#if defined( _PS3 )
+				ThreadedBoneSetup_PS3( nCount );
+#else
+				for ( int i = 0; i < nCount; i++ )
+				{
+					SetupBonesOnBaseAnimating( g_PreviousBoneSetups[i] );
+				}
+#endif
+			}
 			g_bInThreadedBoneSetup = false;
+
+#ifdef _DEBUG
+			for ( int i = test.Count() - 1; i > 0; i-- )
+			{
+				Assert( test[i]->m_pNextForThreadedBoneSetup == NULL );
+			}
+#endif
+
+#ifdef DEBUG_BONE_SETUP_THREADING
+			Msg( "} \n" );
+#endif
 		}
 	}
 	g_iPreviousBoneCounter++;
 	g_PreviousBoneSetups.RemoveAll();
 }
 
-bool C_BaseAnimating::SetupBones( matrix3x4_t *pBoneToWorldOut, int nMaxBones, int boneMask, float currentTime )
+bool C_BaseAnimating::InThreadedBoneSetup()
 {
-	VPROF_BUDGET( "C_BaseAnimating::SetupBones", VPROF_BUDGETGROUP_CLIENT_ANIMATION );
+	return g_bInThreadedBoneSetup;
+}
 
-	//=============================================================================
-	// HPE_BEGIN:
+#ifdef DEBUG
+ConVar cl_limit_anim_fps("cl_limit_anim_fps", "1");
+#endif
+
+#define FPS_TO_FRAMETIME_SECS( _n ) (1000.0f / _n) * 0.001f
+bool C_BaseAnimating::ShouldSkipAnimationFrame( float currentTime )
+{
+#ifdef DEBUG
+	if ( !cl_limit_anim_fps.GetBool() )
+		return false;
+#endif
+
+	// only applies to players
+	if ( !IsPlayer() )
+		return false;
+
+	int nFrameCount = gpGlobals->framecount;
+	if ( !m_nLastNonSkippedFrame || abs( nFrameCount - m_nLastNonSkippedFrame ) >= 2 )
+		return false;
+
+	if ( gpGlobals->frametime < FPS_TO_FRAMETIME_SECS(300.0f) )
+	{
+		nFrameCount += (entindex() % 3); // offset lookups
+		if ( (nFrameCount % 3) != 0 ) // at 300+ fps, compute every third animation frame to floor animation at 100fps
+		{
+			return true;
+		}
+	}
+	else if ( gpGlobals->frametime < FPS_TO_FRAMETIME_SECS(200.0f) )
+	{
+		nFrameCount += (entindex() % 2); // offset lookups
+		if ( (nFrameCount % 2) != 0 ) // at 200+ fps, compute every other animation frame to floor animation at 100fps
+		{
+			return true;
+		}
+	}
+	else if ( gpGlobals->frametime < FPS_TO_FRAMETIME_SECS(150.0f) )
+	{
+		nFrameCount += (entindex() % 3); // offset lookups
+		if ( (nFrameCount % 3) == 0 ) // at 150+ fps, skip every third animation frame to floor animation at 100fps
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+extern ConVar cl_countbones;
+
+bool C_BaseAnimating::SetupBones(matrix3x4_t *pBoneToWorldOut, int nMaxBones, int boneMask, float currentTime)
+{
+	VPROF_BUDGET( "C_BaseAnimating::SetupBones", ( !g_bInThreadedBoneSetup ) ? VPROF_BUDGETGROUP_CLIENT_ANIMATION : "Client_Animation_Threaded" );
+
 	// [pfreese] Added the check for pBoneToWorldOut != NULL in this debug warning
 	// code. SetupBones is called in the CSS anytime an attachment wants its
 	// parent's transform, hence this warning is hit extremely frequently.
 	// I'm not actually sure if this is the right "fix" for this, as the bones are
 	// actually accessed as part of the setup process, but since I'm not clear on the
 	// purpose of this dev warning, I'm including this comment block.
-	//=============================================================================
-
 	if ( pBoneToWorldOut != NULL && !IsBoneAccessAllowed() )
 	{
 		static float lastWarning = 0.0f;
@@ -2806,6 +3030,9 @@ bool C_BaseAnimating::SetupBones( matrix3x4_t *pBoneToWorldOut, int nMaxBones, i
 
 	//boneMask = BONE_USED_BY_ANYTHING; // HACK HACK - this is a temp fix until we have accessors for bones to find out where problems are.
 	
+	// some bones are tagged to always setup, they get OR'd in now
+	boneMask |= BONE_ALWAYS_SETUP;
+
 	if ( GetSequence() == -1 )
 		 return false;
 
@@ -2827,12 +3054,44 @@ bool C_BaseAnimating::SetupBones( matrix3x4_t *pBoneToWorldOut, int nMaxBones, i
 		boneMask |= BONE_USED_BY_ANYTHING;
 	}
 
+	// Or lastly if demo polish recording
+#ifdef DEMOPOLISH_ENABLED
+	if ( IsDemoPolishRecording() && IsPlayer() )
+	{
+		boneMask |= BONE_USED_BY_ANYTHING;
+	}
+#endif	// DEMO_POLISH
+
 	if ( g_bInThreadedBoneSetup )
 	{
+//		boneMask |= ( BONE_USED_BY_ATTACHMENT | BONE_USED_BY_BONE_MERGE | BONE_USED_BY_HITBOX );
+
 		if ( !m_BoneSetupLock.TryLock() )
 		{
-			return false;
+			// someone else is handling
+			// bones are in some intermediate state, wait until the other thread is done.  
+			// If they've setup what bones we want, it'll early out down below
+			m_BoneSetupLock.Lock();
 		}
+		// else, we have the lock
+	}
+	else
+	{
+		m_BoneSetupLock.Lock();
+	}
+
+	// If we're setting up LOD N, we have set up all lower LODs also
+	// because lower LODs always use subsets of the bones of higher LODs.
+	int nLOD = 0;
+	int nMask = BONE_USED_BY_VERTEX_LOD0;
+	for( ; nLOD < MAX_NUM_LODS; ++nLOD, nMask <<= 1 )
+	{
+		if ( boneMask & nMask )
+			break;
+	}
+	for( ; nLOD < MAX_NUM_LODS; ++nLOD, nMask <<= 1 )
+	{
+		boneMask |= nMask;
 	}
 
 #ifdef DEBUG_BONE_SETUP_THREADING
@@ -2847,24 +3106,44 @@ bool C_BaseAnimating::SetupBones( matrix3x4_t *pBoneToWorldOut, int nMaxBones, i
 			m_BoneSetupLock.Unlock();
 		}
 	}
-#endif
+#endif	
 
-	AUTO_LOCK( m_BoneSetupLock );
-
-	if ( g_bInThreadedBoneSetup )
+	// A bit of a hack, but this way when in prediction we use the "correct" gpGlobals->curtime -- rather than the
+	// one that the player artificially advances
+	if ( GetPredictable() && 
+		 prediction->InPrediction() )
 	{
-		m_BoneSetupLock.Unlock();
+		currentTime = prediction->GetSavedTime();
 	}
 
-	if ( m_iMostRecentModelBoneCounter != g_iModelBoneCounter )
+#if defined(_DEBUG_SPUvPPU_ANIMATION)
+	m_BoneAccessor.SetReadableBones( 0 );
+	m_BoneAccessor.SetWritableBones( 0 );
+	m_flLastBoneSetupTime = 0.0f;
+	m_iPrevBoneMask = m_iAccumulatedBoneMask;
+	m_iAccumulatedBoneMask = 0;
+#else
+
+	if( ( m_iMostRecentModelBoneCounter != g_iModelBoneCounter ) && s_bEnableNewBoneSetupRequest )
 	{
 		// Clear out which bones we've touched this frame if this is 
 		// the first time we've seen this object this frame.
-		if ( LastBoneChangedTime() >= m_flLastBoneSetupTime )
+		// BUGBUG: Time can go backward due to prediction, catch that here until a better solution is found
+		if ( LastBoneChangedTime() >= m_flLastBoneSetupTime || currentTime < m_flLastBoneSetupTime )
 		{
+//			SNPROF_ANIM("Anim_NewSetupBones");
+#ifdef DEBUG_BONESETUP_THREADVSNONTHREAD
+			Msg("SetupBones 1st time: %x, mask: %d, mrmbc: %d, time:%f\n", this, boneMask, m_iMostRecentModelBoneCounter, currentTime );
+#endif
+
 			m_BoneAccessor.SetReadableBones( 0 );
 			m_BoneAccessor.SetWritableBones( 0 );
 			m_flLastBoneSetupTime = currentTime;
+
+#if defined( DBGFLAG_ASSERT )
+			m_vBoneSetupCachedOrigin = GetRenderOrigin();
+			m_qBoneSetupCachedAngles = GetRenderAngles();
+#endif
 		}
 		m_iPrevBoneMask = m_iAccumulatedBoneMask;
 		m_iAccumulatedBoneMask = 0;
@@ -2878,34 +3157,42 @@ bool C_BaseAnimating::SetupBones( matrix3x4_t *pBoneToWorldOut, int nMaxBones, i
 #endif
 	}
 
-	int nBoneCount = m_CachedBoneData.Count();
-	if ( g_bDoThreadedBoneSetup && !g_bInThreadedBoneSetup && ( nBoneCount >= 16 ) && !GetMoveParent() && m_iMostRecentBoneSetupRequest != g_iPreviousBoneCounter )
-	{
-		m_iMostRecentBoneSetupRequest = g_iPreviousBoneCounter;
-		Assert( g_PreviousBoneSetups.Find( this ) == -1 );
-		g_PreviousBoneSetups.AddToTail( this );
-	}
+#endif
+
+	MarkForThreadedBoneSetup();
 
 	// Keep track of everthing asked for over the entire frame
-	m_iAccumulatedBoneMask |= boneMask;
+	// But not those things asked for during bone setup
+	{
+		m_iAccumulatedBoneMask |= boneMask;
+	}
 
 	// Make sure that we know that we've already calculated some bone stuff this time around.
+#if !defined(_DEBUG_SPUvPPU_ANIMATION)
 	m_iMostRecentModelBoneCounter = g_iModelBoneCounter;
+#endif
 
 	// Have we cached off all bones meeting the flag set?
 	if( ( m_BoneAccessor.GetReadableBones() & boneMask ) != boneMask )
 	{
-		MDLCACHE_CRITICAL_SECTION();
-
 		CStudioHdr *hdr = GetModelPtr();
 		if ( !hdr || !hdr->SequencesAvailable() )
+		{
+			m_BoneSetupLock.Unlock();
 			return false;
+		}
+
+#if defined( DBGFLAG_ASSERT )
+		bool bHadDirtyAbsTransform = IsEFlagSet( EFL_DIRTY_ABSTRANSFORM );
+#endif
 
 		// Setup our transform based on render angles and origin.
-		matrix3x4_t parentTransform;
+		ALIGN16 matrix3x4_t parentTransform ALIGN16_POST;
 		AngleMatrix( GetRenderAngles(), GetRenderOrigin(), parentTransform );
+		AssertMsg( !bHadDirtyAbsTransform || !IsEFlagSet( EFL_DIRTY_ABSTRANSFORM ), "Using an old origin/angles and unable to recompute before caching off the bones" );
 
 		// Load the boneMask with the total of what was asked for last frame.
+		// WHY?? 
 		boneMask |= m_iPrevBoneMask;
 
 		// Allow access to the bones we're setting up so we don't get asserts in here.
@@ -2913,65 +3200,155 @@ bool C_BaseAnimating::SetupBones( matrix3x4_t *pBoneToWorldOut, int nMaxBones, i
 		m_BoneAccessor.SetWritableBones( m_BoneAccessor.GetReadableBones() | boneMask );
 		m_BoneAccessor.SetReadableBones( m_BoneAccessor.GetWritableBones() );
 
+		// label the entities if we're trying to figure out who is who
+		if ( r_sequence_debug.GetInt() == -1)
+		{
+			Vector theMins, theMaxs;
+			GetRenderBounds( theMins, theMaxs );
+			debugoverlay->AddTextOverlay( GetAbsOrigin() + (theMins + theMaxs) * 0.5f, 0, 0.0f, "%d:%s", entindex(), hdr->pszName() );
+		}
+
 		if (hdr->flags() & STUDIOHDR_FLAGS_STATIC_PROP)
 		{
 			MatrixCopy(	parentTransform, GetBoneForWrite( 0 ) );
 		}
 		else
 		{
-			TrackBoneSetupEnt( this );
+
+#ifdef DEBUG_BONE_SETUP_THREADING
+			if ( !g_bInThreadedBoneSetup )
+			{
+				Msg("!%x\n", this );
+			}
+#endif
+			if ( !g_bInThreadedBoneSetup )
+			{
+				TrackBoneSetupEnt( this );
+			}
 			
 			// This is necessary because it's possible that CalculateIKLocks will trigger our move children
 			// to call GetAbsOrigin(), and they'll use our OLD bone transforms to get their attachments
 			// since we're right in the middle of setting up our new transforms. 
 			//
 			// Setting this flag forces move children to keep their abs transform invalidated.
-			AddFlag( EFL_SETTING_UP_BONES );
+			AddEFlags( EFL_SETTING_UP_BONES );
 
-			// NOTE: For model scaling, we need to opt out of IK because it will mark the bones as already being calculated
-			if ( !IsModelScaled() )
-			{
-				// only allocate an ik block if the npc can use it
-				if ( !m_pIk && hdr->numikchains() > 0 && !(m_EntClientFlags & ENTCLIENTFLAG_DONTUSEIK) )
-				{
-					m_pIk = new CIKContext;
-				}
-			}
-			else
-			{
-				// Reset the IK
-				if ( m_pIk )
-				{
-					delete m_pIk;
-					m_pIk = NULL;
-				}
-			}
+// NOTE: For model scaling, we need to opt out of IK because it will mark the bones as already being calculated
+// [msmith]: What game is it that want's to do model scaling and needs to opt out of IK?  It seems as if opting out of IK should be the exception and not the rule here.
+// I suggest we change the #ifdef such that only the games that need to kill IK get used here... rather than ORing in all other games that use this engine in the future.
+#if defined( PORTAL2 ) || defined( INFESTED ) || defined( CSTRIKE15 )
+			// only allocate an ik block if the npc can use it
+			if ( !m_pIk && hdr->numikchains() > 0 && !(m_EntClientFlags & ENTCLIENTFLAG_DONTUSEIK) )
+				m_pIk = new CIKContext;
+#endif // PORTAL2
 
-			Vector		pos[MAXSTUDIOBONES];
-			Quaternion	q[MAXSTUDIOBONES];
-#if defined(FP_EXCEPTIONS_ENABLED) || defined(DBGFLAG_ASSERT)
-			// Having these uninitialized means that some bugs are very hard
-			// to reproduce. A memset of 0xFF is a simple way of getting NaNs.
-			memset( pos, 0xFF, sizeof(pos) );
-			memset( q, 0xFF, sizeof(q) );
+#if defined( _PS3 )
+			BoneVector						pos[MAXSTUDIOBONES] ALIGN128;
+			BoneQuaternionAligned			q[MAXSTUDIOBONES]   ALIGN128;
+#else
+			Vector						pos[MAXSTUDIOBONES];
+			Quaternion					q[MAXSTUDIOBONES];
 #endif
-
-			int bonesMaskNeedRecalc = boneMask | oldReadableBones; // Hack to always recalc bones, to fix the arm jitter in the new CS player anims until Ken makes the real fix
 
 			if ( m_pIk )
 			{
-				if (Teleported() || IsNoInterpolationFrame())
+				if (Teleported() || IsEffectActive(EF_NOINTERP))
+				{
 					m_pIk->ClearTargets();
+				}
 
-				m_pIk->Init( hdr, GetRenderAngles(), GetRenderOrigin(), currentTime, gpGlobals->framecount, bonesMaskNeedRecalc );
+				m_pIk->Init( hdr, GetRenderAngles(), GetRenderOrigin(), currentTime, gpGlobals->framecount, boneMask );
 			}
 
 			// Let pose debugger know that we are blending
 			g_pPoseDebugger->StartBlending( this, hdr );
 
-			StandardBlendingRules( hdr, pos, q, currentTime, bonesMaskNeedRecalc );
+			bool bSkipThisFrame = ShouldSkipAnimationFrame( currentTime );
 
 			CBoneBitList boneComputed;
+
+			if ( !bSkipThisFrame )
+			{
+				int nTempMask = boneMask;
+
+				if ( m_nCustomBlendingRuleMask != -1 )
+				{
+					nTempMask &= m_nCustomBlendingRuleMask;
+				}
+
+				nTempMask |= BONE_ALWAYS_SETUP; // make sure we always set up these bones
+
+				if ( cl_countbones.GetBool() )
+				{
+					for ( int i = 0; i < hdr->numbones(); ++i )
+					{
+						if ( hdr->boneFlags(i) & nTempMask )
+							g_nNumBonesSetupBlendingRulesOnlyTemp++;
+					}
+				}
+
+				StandardBlendingRules( hdr, pos, q, currentTime, nTempMask );
+				
+				if ( IsPlayer() && nTempMask != boneMask )
+				{
+					// restore the saved transforms of the leafy bones that got re-initialized during StandardBlendingRules.
+					// This will hold bones in their last computed pose and hide the lod pop on the way out (they may still pop on the way in)
+					for ( int i = 0; i < hdr->numbones(); ++i )
+					{
+						if ( (hdr->boneFlags(i) & (BONE_USED_BY_ATTACHMENT | BONE_USED_BY_HITBOX | BONE_ALWAYS_SETUP) ) == 0 )
+						{
+							pos[i] = m_pos_cached[i];
+							q[i] = m_q_cached[i];
+						}
+					}
+
+				}
+
+				if ( cl_countbones.GetBool() )
+				{
+					Vector from, to;
+					for ( int i = 0; i < hdr->numbones(); ++i )
+					{
+						if ( !(hdr->boneFlags( i ) & nTempMask) )
+							continue;
+
+						int const iParentIndex = hdr->boneParent( i );
+						if ( iParentIndex < 0 )
+							continue;
+
+						MatrixPosition( m_BoneAccessor[ i            ], from );
+						MatrixPosition( m_BoneAccessor[ iParentIndex ], to   );
+
+						if ( IsPlayer() )
+						{
+							debugoverlay->AddLineOverlay( from, to, 0, 255, 255, true, 0.0f );
+						}
+						else
+						{
+							debugoverlay->AddLineOverlay( from + Vector(2,0,0), to + Vector(2,0,0), 200, 0, 255, true, 0.0f );
+						}
+					}
+				}
+
+				m_nLastNonSkippedFrame = gpGlobals->framecount;
+			}
+			else
+			{
+				memcpy( pos, m_pos_cached, sizeof( Vector ) * hdr->numbones() );
+				memcpy( q, m_q_cached, sizeof( Quaternion ) * hdr->numbones() );
+
+				boneComputed.ClearAll(); // because we need to re-BuildTransformations on all our bones with a new root xform
+				boneMask = m_BoneAccessor.GetWritableBones();
+			}
+
+#ifdef DEMOPOLISH_ENABLED
+			bool const bShouldPolish = IsDemoPolishEnabled() && IsPlayer();
+			if ( bShouldPolish && engine->IsPlayingDemo() )
+			{
+				DemoPolish_GetController().MakeLocalAdjustments( entindex(), hdr, boneMask, pos, q, boneComputed );
+			}
+#endif
+
 			// don't calculate IK on ragdolls
 			if ( m_pIk && !IsRagdoll() )
 			{
@@ -2981,39 +3358,91 @@ bool C_BaseAnimating::SetupBones( matrix3x4_t *pBoneToWorldOut, int nMaxBones, i
 
 				CalculateIKLocks( currentTime );
 				m_pIk->SolveDependencies( pos, q, m_BoneAccessor.GetBoneArrayForWrite(), boneComputed );
+
+				if ( IsPlayer() && ( (BONE_USED_BY_VERTEX_LOD0 & boneMask) == BONE_USED_BY_VERTEX_LOD0 ) )
+				{
+					// only do extra bone processing when setting up bones that influence renderable vertices, and not for attachment position requests
+					DoExtraBoneProcessing( hdr, pos, q, m_BoneAccessor.GetBoneArrayForWrite(), boneComputed, m_pIk );
+				}
+
 			}
 
-			BuildTransformations( hdr, pos, q, parentTransform, bonesMaskNeedRecalc, boneComputed );
-			
-			RemoveFlag( EFL_SETTING_UP_BONES );
+#ifdef DEMOPOLISH_ENABLED
+			if ( m_bBonePolishSetup && bShouldPolish && engine->IsRecordingDemo() )
+			{
+				DemoPolish_GetRecorder().RecordAnimData( entindex(), hdr, GetCycle(), parentTransform, pos, q, boneMask, m_BoneAccessor );
+			}
+#endif
+
+			BuildTransformations( hdr, pos, q, parentTransform, boneMask, boneComputed );
+
+#if defined(_DEBUG_SPUvPPU_ANIMATION)
+
+// 			m_PPUboneMaskUsed = bonesMaskNeedRecalc;
+// 			memcpy( ppuP, pos, m_pStudioHdr->numbones() * sizeof(BoneVector));
+// 			memcpy( ppuQ, q, m_pStudioHdr->numbones() * sizeof(BoneQuaternion));
+
+#endif
+
+
+#ifdef DEMOPOLISH_ENABLED
+			// Override bones?
+			if ( bShouldPolish && engine->IsPlayingDemo() )
+			{
+				DemoPolish_GetController().MakeGlobalAdjustments( entindex(), hdr, boneMask, m_BoneAccessor );
+			}
+#endif
+
+			if ( cl_countbones.GetBool() )
+			{
+				for ( int i = 0; i < hdr->numbones(); ++i )
+				{
+					if ( hdr->boneFlags(i) & boneMask )
+						g_nNumBonesSetupAllTemp++;
+				}
+			}
+
+			// Draw skeleton?
+			if ( enable_skeleton_draw.GetBool() )
+			{
+				DrawSkeleton( hdr, boneMask );
+			}
+
+			RemoveEFlags( EFL_SETTING_UP_BONES );
 			ControlMouth( hdr );
+			if ( !bSkipThisFrame )
+			{
+				memcpy( m_pos_cached, pos, sizeof( Vector ) * hdr->numbones() );
+				memcpy( m_q_cached, q, sizeof( Quaternion ) * hdr->numbones() );
+			}
+
 		}
 		
 		if( !( oldReadableBones & BONE_USED_BY_ATTACHMENT ) && ( boneMask & BONE_USED_BY_ATTACHMENT ) )
 		{
-			if ( !SetupBones_AttachmentHelper( hdr ) )
-			{
-				DevWarning( 2, "SetupBones: SetupBones_AttachmentHelper failed.\n" );
-				return false;
-			}
+			SetupBones_AttachmentHelper( hdr );
 		}
 	}
-
+	
 	// Do they want to get at the bone transforms? If it's just making sure an aiment has 
 	// its bones setup, it doesn't need the transforms yet.
 	if ( pBoneToWorldOut )
 	{
+		AssertMsgOnce( !IsEFlagSet( EFL_DIRTY_ABSTRANSFORM ), "Cached bone data has old abs origin/angles" );
+		//AssertMsgOnce( (m_vBoneSetupCachedOrigin == GetRenderOrigin()) && (m_qBoneSetupCachedAngles == GetRenderAngles()), "Renderable moved since cached" );
 		if ( nMaxBones >= m_CachedBoneData.Count() )
 		{
-			memcpy( pBoneToWorldOut, m_CachedBoneData.Base(), sizeof( matrix3x4_t ) * m_CachedBoneData.Count() );
+			Plat_FastMemcpy( pBoneToWorldOut, m_CachedBoneData.Base(), sizeof( matrix3x4_t ) * m_CachedBoneData.Count() );
 		}
 		else
 		{
-			ExecuteNTimes( 25, Warning( "SetupBones: invalid bone array size (%d - needs %d)\n", nMaxBones, m_CachedBoneData.Count() ) );
+			Warning( "SetupBones: invalid bone array size (%d - needs %d)\n", nMaxBones, m_CachedBoneData.Count() );
+			m_BoneSetupLock.Unlock();
 			return false;
 		}
 	}
 
+	m_BoneSetupLock.Unlock();
 	return true;
 }
 
@@ -3050,8 +3479,15 @@ C_BaseAnimating* C_BaseAnimating::FindFollowedEntity()
 
 void C_BaseAnimating::InvalidateBoneCache()
 {
+	// mariod - testing
+ 	if( !s_bEnableInvalidateBoneCache )
+ 		return;
+
+//	SNPROF_ANIM("Anim_InvalidateBoneCache");
+
+
 	m_iMostRecentModelBoneCounter = g_iModelBoneCounter - 1;
-	m_flLastBoneSetupTime = -FLT_MAX; 
+	m_flLastBoneSetupTime = -FLT_MAX;
 }
 
 
@@ -3135,6 +3571,11 @@ C_BaseAnimating::AutoAllowBoneAccess::~AutoAllowBoneAccess( )
 // (static function)
 void C_BaseAnimating::InvalidateBoneCaches()
 {
+	g_nNumBonesSetupAll = g_nNumBonesSetupAllTemp;
+	g_nNumBonesSetupAllTemp = 0;
+	g_nNumBonesSetupBlendingRulesOnly = g_nNumBonesSetupBlendingRulesOnlyTemp;
+	g_nNumBonesSetupBlendingRulesOnlyTemp = 0;
+
 	g_iModelBoneCounter++;
 }
 
@@ -3242,6 +3683,31 @@ int C_BaseAnimating::DrawModel( int flags )
 	DrawBBoxVisualizations();
 
 	return drawn;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Draw skeleton topology & coordinate systems
+//-----------------------------------------------------------------------------
+void C_BaseAnimating::DrawSkeleton(CStudioHdr const *pHdr, int iBoneMask) const
+{
+	if (!pHdr)
+		return;
+
+	Vector from, to;
+	for (int i = 0; i < pHdr->numbones(); ++i)
+	{
+		if (!(pHdr->boneFlags(i) & iBoneMask)) continue;
+
+		debugoverlay->AddCoordFrameOverlay(m_BoneAccessor[i], 3.0f);
+
+		int const iParentIndex = pHdr->boneParent(i);
+		if (iParentIndex < 0) continue;
+
+		MatrixPosition(m_BoneAccessor[i], from);
+		MatrixPosition(m_BoneAccessor[iParentIndex], to);
+
+		debugoverlay->AddLineOverlay(from, to, 0, 255, 255, true, 0.0f);
+	}
 }
 
 //-----------------------------------------------------------------------------

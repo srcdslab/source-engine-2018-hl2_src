@@ -159,7 +159,9 @@ public:
 	//
 	virtual CMouthInfo *GetMouth();
 	virtual void	ControlMouth( CStudioHdr *pStudioHdr );
-	
+
+	virtual void DoExtraBoneProcessing( CStudioHdr *pStudioHdr, Vector pos[], Quaternion q[], matrix3x4_t boneToWorld[], CBoneBitList &boneComputed, CIKContext *pIKContext ) { Assert(false); }
+
 	// override in sub-classes
 	virtual void DoAnimationEvents( CStudioHdr *pStudio );
 	virtual void FireEvent( const Vector& origin, const QAngle& angles, int event, const char *options );
@@ -277,6 +279,8 @@ public:
 	bool							GetAttachmentLocal( int iAttachment, Vector &origin, QAngle &angles );
 	bool                            GetAttachmentLocal( int iAttachment, Vector &origin );
 
+	virtual C_BaseAnimating *		GetBoneSetupDependancy( void ) { return GetMoveParent() ? GetMoveParent()->GetBaseAnimating() : NULL; }
+
 	bool							GetRootBone( matrix3x4_t &rootBone );
 
 	// Should this object cast render-to-texture shadows?
@@ -365,6 +369,7 @@ public:
 	char const						*GetHitboxSetName( void );
 	int								GetHitboxSetCount( void );
 	void							DrawClientHitboxes( float duration = 0.0f, bool monocolor = false );
+	void							DrawSkeleton( CStudioHdr const* pHdr, int iBoneMask ) const;
 
 	C_BaseAnimating*				FindFollowedEntity();
 
@@ -403,8 +408,11 @@ public:
 	static void						PushAllowBoneAccess( bool bAllowForNormalModels, bool bAllowForViewModels, char const *tagPush );
 	static void						PopBoneAccess( char const *tagPop );
 	static void						ThreadedBoneSetup();
+	static bool						InThreadedBoneSetup();
 	static void						InitBoneSetupThreadPool();
 	static void						ShutdownBoneSetupThreadPool();
+	void							MarkForThreadedBoneSetup();
+	static void						SetupBonesOnBaseAnimating( C_BaseAnimating *&pBaseAnimating );
 
 	// Invalidate bone caches so all SetupBones() calls force bone transforms to be regenerated.
 	static void						InvalidateBoneCaches();
@@ -492,6 +500,8 @@ public:
 	// Object bodygroup
 	int								m_nBody;
 
+	int								m_nCustomBlendingRuleMask;
+
 	// Hitbox set to use (default 0)
 	int								m_nHitboxSet;
 
@@ -515,8 +525,12 @@ protected:
 	// bone transformation matrix
 	unsigned long					m_iMostRecentModelBoneCounter;
 	unsigned long					m_iMostRecentBoneSetupRequest;
+	C_BaseAnimating *				m_pNextForThreadedBoneSetup;
 	int								m_iPrevBoneMask;
 	int								m_iAccumulatedBoneMask;
+
+	static bool						s_bEnableInvalidateBoneCache;
+	static bool						s_bEnableNewBoneSetupRequest;
 
 	CBoneAccessor					m_BoneAccessor;
 	CThreadFastMutex				m_BoneSetupLock;
@@ -618,6 +632,12 @@ private:
 	// These are compared against each other to determine if the entity should muzzle flash.
 	CNetworkVar( unsigned char, m_nMuzzleFlashParity );
 	unsigned char m_nOldMuzzleFlashParity;
+
+	bool							ShouldSkipAnimationFrame( float currentTime );
+	int								m_nLastNonSkippedFrame;
+
+	Vector							m_pos_cached[MAXSTUDIOBONES];
+	Quaternion						m_q_cached[MAXSTUDIOBONES];
 
 	bool							m_bInitModelEffects;
 	bool							m_bDelayInitModelEffects;

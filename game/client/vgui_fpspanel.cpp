@@ -27,6 +27,14 @@ static ConVar cl_showfps( "cl_showfps", "0", FCVAR_ALLOWED_IN_COMPETITIVE, "Draw
 static ConVar cl_showpos( "cl_showpos", "0", 0, "Draw current position at top of screen" );
 static ConVar cl_showbattery( "cl_showbattery", "0", 0, "Draw current battery level at top of screen when on battery power" );
 
+extern unsigned int g_nNumBonesSetupBlendingRulesOnly;
+extern unsigned int g_nNumBonesSetupAll;
+ConVar cl_countbones( "cl_countbones", "0", FCVAR_CHEAT, "" );
+
+#ifdef _GAMECONSOLE
+static ConVar cl_showlowmemory( "cl_showlowmemory", "0", FCVAR_CHEAT, "Set to N to display a warning message if we have less than N MB of free memory (0 disables)." );
+#endif
+
 extern bool g_bDisplayParticlePerformance;
 int GetParticlePerformance();
 
@@ -162,8 +170,14 @@ bool CFPSPanel::ShouldDraw( void )
 {
 	if ( g_bDisplayParticlePerformance )
 		return true;
-	if ( ( !cl_showfps.GetInt() || ( gpGlobals->absoluteframetime <= 0 ) ) &&
-		 ( !cl_showpos.GetInt() ) )
+	if ( ( !cl_showfps.GetInt( ) || ( gpGlobals->absoluteframetime <= 0 ) ) && !cl_showpos.GetInt( ) 
+#ifdef CSTRIKE15		 
+		 && !cl_countbones.GetBool()
+#endif
+#ifdef _GAMECONSOLE
+		&& !cl_showlowmemory.GetInt()
+#endif
+	)
 	{
 		m_bLastDraw = false;
 		return false;
@@ -349,7 +363,26 @@ void CFPSPanel::Paint()
 											  "vel:  %.2f", 
 											  vel.Length() );
 	}
-	
+
+#ifdef CSTRIKE15
+
+	if ( cl_countbones.GetBool() )
+	{
+		i++;
+		g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight,
+				255, 255, 255, 255,
+				"All computed bones:  %i",
+				g_nNumBonesSetupAll );
+		i++;
+		g_pMatSystemSurface->DrawColoredText( m_hFont, x, 2 + i * lineHeight,
+				255, 255, 255, 255,
+				"Blending rules only:  %i",
+				g_nNumBonesSetupBlendingRulesOnly );
+		
+	}
+
+#endif
+
 	if ( cl_showbattery.GetInt() > 0 )
 	{
 		if ( steamapicontext && steamapicontext->SteamUtils() && 
@@ -373,6 +406,22 @@ void CFPSPanel::Paint()
 			}
 		}
 	}
+
+#ifdef _GAMECONSOLE
+	// Display a warning message if free memory dips below a certain threshold
+	size_t nUsedMem = 0, nFreeMem = 0, nMemoryThreshold = 1024*1024*cl_showlowmemory.GetInt();
+	if ( nMemoryThreshold )
+	{
+		g_pMemAlloc->GlobalMemoryStatus( &nUsedMem, &nFreeMem );
+		if ( nFreeMem < nMemoryThreshold )
+		{
+			i += 2;
+			g_pMatSystemSurface->DrawColoredText(	m_hFont, x, 2 + i * lineHeight, 255, 150, 40, 255,
+													"WARNING: low memory! (%3.1fMB)  Report if seen at a test station...\n", nFreeMem/(float)(1024*1024) );
+		}
+	}
+#endif // _GAMECONSOLE
+
 }
 
 class CFPS : public IFPSPanel

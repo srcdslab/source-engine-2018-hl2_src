@@ -255,6 +255,11 @@ public:
 	virtual void ResetErrorModelStatus( MDLHandle_t handle ) = 0;
 
 	virtual void MarkFrame() = 0;
+
+	// Locking for things that we can lock over longer intervals than
+	// resources locked by BeginLock/EndLock
+	virtual void BeginCoarseLock() = 0;
+	virtual void EndCoarseLock() = 0;
 };
 
 
