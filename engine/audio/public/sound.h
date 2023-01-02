@@ -44,6 +44,8 @@ void S_OnLoadScreen(bool value);
 void S_EnableThreadedMixing( bool bEnable );
 void S_EnableMusic( bool bEnable );
 
+void S_PreventSound(bool bSetting);
+
 struct StartSoundParams_t
 {
 	StartSoundParams_t() :
@@ -62,7 +64,8 @@ struct StartSoundParams_t
 		delay( 0.0f ),
 		speakerentity( -1 ),
 		suppressrecording( false ),
-		initialStreamPosition( 0 )
+		initialStreamPosition( 0 ),
+		m_nQueuedGUID( UNINT_GUID )
 	{
 		origin.Init();
 		direction.Init();
@@ -86,6 +89,10 @@ struct StartSoundParams_t
 	int				speakerentity;
 	bool			suppressrecording;
 	int				initialStreamPosition;
+	int				m_nQueuedGUID;
+
+	static const int	UNINT_GUID = -1;
+	static const int	GENERATE_GUID = -2;		// Generate GUID regardless of the other vol and pitch flags.
 };
 
 int S_StartSound( StartSoundParams_t& params );

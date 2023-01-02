@@ -171,9 +171,9 @@ bool CFPSPanel::ShouldDraw( void )
 	if ( g_bDisplayParticlePerformance )
 		return true;
 	if ( ( !cl_showfps.GetInt( ) || ( gpGlobals->absoluteframetime <= 0 ) ) && !cl_showpos.GetInt( ) 
-#ifdef CSTRIKE15		 
+// #ifdef CSTRIKE15
 		 && !cl_countbones.GetBool()
-#endif
+// #endif
 #ifdef _GAMECONSOLE
 		&& !cl_showlowmemory.GetInt()
 #endif

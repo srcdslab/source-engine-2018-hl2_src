@@ -552,7 +552,11 @@ bool CBaseClient::SendSignonData( void )
 	}
 
 	m_NetChannel->SendData( m_Server->m_Signon );
-		
+
+#ifndef DEDICATED
+	S_PreventSound( false ); //it is now safe to use audio again.
+#endif
+
 	m_nSignonState = SIGNONSTATE_PRESPAWN;
 	NET_SignonState signonState( m_nSignonState, m_Server->GetSpawnCount() );
 	

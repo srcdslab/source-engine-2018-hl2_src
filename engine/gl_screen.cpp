@@ -77,6 +77,7 @@ void SCR_BeginLoadingPlaque( void )
 		scr_drawloading = true;
 
 		S_StopAllSounds( true );
+		S_PreventSound( true ); //this will stop audio from reaching the mixer until SCR_EndLoadingPlaque is called.
 		S_OnLoadScreen( true );
 
 		g_pFileSystem->AsyncFinishAll();

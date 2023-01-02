@@ -37,6 +37,7 @@
 #include "../../pure_server.h"
 #include "filesystem/IQueuedLoader.h"
 #include "voice.h"
+#include "sys_dll.h"
 #if defined( _X360 )
 #include "xbox/xbox_console.h"
 #include "xmp.h"
@@ -83,6 +84,7 @@ void S_StopAllSounds(bool clear);
 void S_StopAllSoundsC(void);
 void S_ShutdownMixThread();
 const char *GetClientClassname( SoundSource soundsource );
+void S_PreventSound(bool bSetting);
 
 float SND_GetGainObscured( channel_t *ch, bool fplayersound, bool flooping, bool bAttenuated );
 void DSP_ChangePresetValue( int idsp, int channel, int iproc, float value );
@@ -139,6 +141,9 @@ int g_csoundmixers	= 0;					// total number of soundmixers found
 int g_cgrouprules	= 0;					// total number of group rules found
 int g_cgroupclass	= 0;
 
+// This is a hack to prevent audio from being referenced during a load.
+bool g_bPreventSound = false;
+
 // this is used to enable/disable music playback on x360 when the user selects his own soundtrack to play
 void S_EnableMusic( bool bEnable )
 {
@@ -161,8 +166,8 @@ bool IsSoundSourceLocalPlayer( int soundsource )
 }
 
 CThreadMutex g_SndMutex;
-
 #define THREAD_LOCK_SOUND() AUTO_LOCK( g_SndMutex )
+CThreadFastMutex g_ActiveSoundListMutex;
 
 const int MASK_BLOCK_AUDIO = CONTENTS_SOLID|CONTENTS_MOVEABLE|CONTENTS_WINDOW;
 
@@ -214,6 +219,38 @@ void CActiveChannels::GetActiveChannels( CChannelList &list )
 	list.m_has22kChannels = true;
 	list.m_has44kChannels = true;
 	list.m_hasDryChannels = true;
+}
+
+void CActiveChannels::CopyActiveSounds( CUtlVector<activethreadsound_t> &list ) const
+{
+	list.SetCount( m_count );
+	for ( int i = 0; i < m_count; i++ )
+	{
+		list[i].m_nGuid = channels[m_list[i]].guid;
+		list[i].m_flElapsedTime = 0.0f;
+		CAudioMixer *pMixer = channels[m_list[i]].pMixer;
+		if ( pMixer )
+		{
+			float flDivisor = ( pMixer->GetSource()->SampleRate() * channels[m_list[i]].pitch * 0.01f );
+			if( flDivisor > 0.0f )
+			{
+				list[i].m_flElapsedTime = pMixer->GetSamplePosition() / flDivisor;
+			}
+		}
+	}
+}
+
+channel_t * CActiveChannels::FindActiveChannelByGuid( int guid ) const
+{
+	for ( int i = 0; i < m_count; i++ )
+	{
+		channel_t *pChannel = &channels[ m_list[ i ] ];
+		if ( pChannel->guid == guid )
+		{
+			return pChannel;
+		}
+	}
+	return NULL;
 }
 
 void CActiveChannels::Init()
@@ -466,6 +503,8 @@ ConVar snd_mix_async( "snd_mix_async", "0" );
 #ifdef _DEBUG
 static ConCommand snd_mixvol("snd_mixvol", MXR_DebugSetMixGroupVolume, "Set named Mixgroup to mix volume.");
 #endif
+
+extern ConVar host_threaded_sound;
 
 // vaudio DLL
 IVAudio *vaudio = NULL;
@@ -4312,6 +4351,18 @@ void RemapPlayerOrMusicVols(  channel_t *ch, int volumes[CCHANVOLUMES/2], bool f
 }
 
 static int s_nSoundGuid = 0;
+static int s_nMaxQueuedGUID = 0;	// Max GUID to go through the queue. Used to optimize some tests.
+static CUtlVector<activethreadsound_t> g_ActiveSoundsLastUpdate( 0, MAX_CHANNELS );
+
+static int SND_GetGUID()
+{
+	int nextGUID = ++s_nSoundGuid;
+	if ( nextGUID < 0 )
+	{
+		s_nSoundGuid = nextGUID = 1;			// No point having negative GUIDs
+	}
+	return nextGUID;
+}
 
 void SND_ActivateChannel( channel_t *pChannel )
 {
@@ -5656,7 +5707,8 @@ int S_StartStaticSound( StartSoundParams_t& params )
 static ConVar snd_filter( "snd_filter", "", FCVAR_CHEAT );
 #endif // STAGING_ONLY
 
-int S_StartSound( StartSoundParams_t& params )
+// This function is capable of starting both static and dynamic sounds
+static int S_StartSound_Immediate( StartSoundParams_t& params )
 {
 
 	if( ! params.pSfx )
@@ -5689,6 +5741,36 @@ int S_StartSound( StartSoundParams_t& params )
 		VPROF_( "StartDynamicSound", 0, VPROF_BUDGETGROUP_OTHER_SOUND, false, BUDGETFLAG_OTHER );
 		return S_StartDynamicSound( params );
 	}
+}
+
+CTSQueue< StartSoundParams_t >	g_QueuedSounds;
+static int S_StartSound_( StartSoundParams_t& params )
+{
+	VPROF_( "S_StartSound_", 0, VPROF_BUDGETGROUP_OTHER_SOUND, false, BUDGETFLAG_OTHER );	
+
+	if ( host_threaded_sound.GetInt() )
+	{
+		// queue the sounds up, drained when viable
+		// this also solves not losing inter-loading sounds from network events
+		// these queue up and get drained when loading is completed
+		if ( g_AudioDevice && g_AudioDevice->IsActive() && ( params.pSfx || params.m_nQueuedGUID > 0 ) )
+		{
+			bool bGenerateGuid = ( params.m_nQueuedGUID == StartSoundParams_t::GENERATE_GUID );
+			if ( params.m_nQueuedGUID == StartSoundParams_t::UNINT_GUID )
+			{
+				// Generate guid for unambiguous start command, not changes.
+				bGenerateGuid = ( ( params.flags & ( SND_STOP | SND_CHANGE_VOL | SND_CHANGE_PITCH ) ) == 0 );
+			}
+			if ( bGenerateGuid )
+			{
+				params.m_nQueuedGUID = SND_GetGUID();
+			}
+			g_QueuedSounds.PushItem( params );
+			return params.m_nQueuedGUID;
+		}
+	}
+
+	return S_StartSound_Immediate( params );
 }
 
 // Restart all the sounds on the specified channel
@@ -5820,6 +5902,25 @@ int S_GetGuidForLastSoundEmitted()
 //-----------------------------------------------------------------------------
 bool S_IsSoundStillPlaying( int guid )
 {
+	// sound was submitted after last channel queue went into the mix, won't have a channel yet
+	THREAD_LOCK_SOUND();
+	if ( host_threaded_sound.GetBool() )
+	{ 
+		AUTO_LOCK( g_ActiveSoundListMutex );
+		if ( guid > s_nMaxQueuedGUID )
+		{
+			// If the GUID is greater than the last set of queued GUID, it means the sound has probably not made through the active sound list yet
+			// We assume that it is still playing. This is not accurate though if the caller passed a bogus GUID.
+			return true;
+		}
+		// don't need to lock the sound mutex if we use this list
+		for ( int i = 0; i < g_ActiveSoundsLastUpdate.Count(); i++ )
+		{
+			if ( guid == g_ActiveSoundsLastUpdate[i].m_nGuid )
+				return true;
+		}
+		return false;
+	}
 	channel_t *pChannel = S_FindChannelByGuid( guid );
 	return pChannel != NULL ? true : false;
 }
@@ -5842,16 +5943,28 @@ void S_SetVolumeByGuid( int guid, float fvol )
 //-----------------------------------------------------------------------------
 float S_GetElapsedTimeByGuid( int guid )
 {
+	if ( host_threaded_sound.GetBool() )
+	{
+		AUTO_LOCK( g_ActiveSoundListMutex );
+		if ( guid < s_nMaxQueuedGUID )
+		{
+			// The guid is in the range of GUIDs from current active sounds, let's do the look-up.
+
+			// don't need to lock the sound mutex if we use this list
+			for ( int i = 0; i < g_ActiveSoundsLastUpdate.Count(); i++ )
+			{
+				if ( guid == g_ActiveSoundsLastUpdate[i].m_nGuid )
+					return g_ActiveSoundsLastUpdate[i].m_flElapsedTime;
+			}
+		}
+		// We did not find the GUID, that's an error condition returning 0.0f.
+		// Or we did not access it yet from the thread sound, in that case the elapsed time of the sound is 0.0f.
+		return 0.0f;
+	}
+
+	THREAD_LOCK_SOUND();
 	channel_t *pChannel = S_FindChannelByGuid( guid );
-	if ( !pChannel )
-		return 0.0f;
-
-	CAudioMixer *mixer = pChannel->pMixer;
-	if ( !mixer )
-		return 0.0f;
-
-	float elapsed = mixer->GetSamplePosition() / ( mixer->GetSource()->SampleRate() * pChannel->pitch * 0.01f );
-	return elapsed;
+	return S_GetElapsedTime( pChannel );
 }
 
 //-----------------------------------------------------------------------------
@@ -5913,17 +6026,33 @@ void S_StopAllSounds( bool bClear )
 
 	total_channels = MAX_DYNAMIC_CHANNELS;	// no statics
 
+
+	DevMsg( 1, "Stopping All Sounds...\n" );
 	CChannelList list;
 	g_ActiveChannels.GetActiveChannels( list );
 	for ( i = 0; i < list.Count(); i++ )
 	{
-		channel_t *pChannel = list.GetChannel(i);
-		if ( channels[i].sfx )
+		char nameBuf[MAX_PATH];
+		channel_t *pChannel = list.GetChannel( i );
+		char *pName = nameBuf;
+		if ( pChannel->sfx )
 		{
-			DevMsg( 1, "%2d:Stopped sound %s\n", i, channels[i].sfx->getname() );
+			pName = (char *)pChannel->sfx->getname();
 		}
+		else
+		{
+			pName = "Unknown";
+		}
+		DevMsg( 1, "Stopping: Channel:%2d %s\n", list.GetChannelIndex( i ), pName );
+
 		S_FreeChannel( pChannel );
 	}
+	// flush the mouth update queue
+	//SND_MouthUpdateAll();
+	g_QueuedSounds.Purge();
+
+	// sound operator system stuff
+	//g_pSoundOperatorSystem->ClearSubSystems();
 
 	Q_memset( channels, 0, MAX_CHANNELS * sizeof(channel_t) );
 
@@ -5935,8 +6064,16 @@ void S_StopAllSounds( bool bClear )
 	// Clear any remaining soundfade
 	memset( &soundfade, 0, sizeof( soundfade ) );
 
-	g_AudioDevice->StopAllSounds();
 	Assert( g_ActiveChannels.GetActiveCount() == 0 );
+}
+
+void S_PreventSound( bool bSetting )
+{
+	g_bPreventSound = bSetting;
+}
+bool S_GetPreventSound( void )
+{
+	return g_bPreventSound;
 }
 
 void S_StopAllSoundsC( void )
@@ -6098,6 +6235,31 @@ void ConvertListenerVectorTo2D( Vector *pvforward, Vector *pvright )
 // channels each frame. The round robin will spatialize 1 / (2 ^ x) 
 // of the spatial channels each frame.
 ConVar snd_spatialize_roundrobin( "snd_spatialize_roundrobin", "0", FCVAR_ALLOWED_IN_COMPETITIVE, "Lowend optimization: if nonzero, spatialize only a fraction of sound channels each frame. 1/2^x of channels will be spatialized per frame." );
+
+void S_StartQueuedSounds()
+{
+	if ( !g_QueuedSounds.Count() || g_bPreventSound )
+	{
+		// empty or not ready to drain the queued yet
+		return;
+	}
+
+	// Update the max queued GUID only if it is greater, modifying an old sound should not change the behavior of this value
+	int lastGUID = s_nMaxQueuedGUID;
+	while ( 1 )
+	{
+		StartSoundParams_t soundParams;
+		if ( !g_QueuedSounds.PopItem( &soundParams ) )
+		{
+			break;
+		}
+		int nGuid = S_StartSound_Immediate( soundParams );
+		lastGUID = MAX( lastGUID, nGuid );
+	}
+	s_nMaxQueuedGUID = lastGUID;
+}
+
+
 /*
 ============
 S_Update
@@ -6117,7 +6279,22 @@ void S_Update( const AudioState_t *pAudioState )
 	if ( !g_AudioDevice->IsActive() )
 		return;
 
+	MDLCACHE_CRITICAL_SECTION_( g_pMDLCache );
+
+	// update soundoperator system before doing anything that uses
+
+	// start queued sounds
+	if ( host_threaded_sound.GetInt() )
+	{
+		S_StartQueuedSounds();
+	}
+
 	g_SndMutex.Lock();
+	if ( host_threaded_sound.GetInt() )
+	{
+		AUTO_LOCK( g_ActiveSoundListMutex );
+		g_ActiveChannels.CopyActiveSounds( g_ActiveSoundsLastUpdate );
+	}
 
 	// Update any client side sound fade
 	S_UpdateSoundFade();

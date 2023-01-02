@@ -3236,11 +3236,11 @@ bool C_BaseAnimating::SetupBones(matrix3x4_t *pBoneToWorldOut, int nMaxBones, in
 // NOTE: For model scaling, we need to opt out of IK because it will mark the bones as already being calculated
 // [msmith]: What game is it that want's to do model scaling and needs to opt out of IK?  It seems as if opting out of IK should be the exception and not the rule here.
 // I suggest we change the #ifdef such that only the games that need to kill IK get used here... rather than ORing in all other games that use this engine in the future.
-#if defined( PORTAL2 ) || defined( INFESTED ) || defined( CSTRIKE15 )
+// #if defined( PORTAL2 ) || defined( INFESTED ) || defined( CSTRIKE15 )
 			// only allocate an ik block if the npc can use it
 			if ( !m_pIk && hdr->numikchains() > 0 && !(m_EntClientFlags & ENTCLIENTFLAG_DONTUSEIK) )
 				m_pIk = new CIKContext;
-#endif // PORTAL2
+// #endif // PORTAL2
 
 #if defined( _PS3 )
 			BoneVector						pos[MAXSTUDIOBONES] ALIGN128;

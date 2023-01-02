@@ -458,7 +458,10 @@ enum HostThreadMode
 	HTM_FORCED,
 };
 
-ConVar host_thread_mode( "host_thread_mode", ( IsX360() ) ? "1" : "0", 0, "Run the host in threaded mode, (0 == off, 1 == if multicore, 2 == force)" );
+// On the PS3, we want host_thead_mode and threaded_sound off.
+ConVar host_thread_mode( "host_thread_mode", ( IsX360() || IsPS3() ) ? "1" : "0", FCVAR_NONE, "Run the host in threaded mode, (0 == off, 1 == if multicore, 2 == force)" );
+ConVar host_threaded_sound( "host_threaded_sound", ( IsX360() || IsPS3()) ? "1" : "0", FCVAR_NONE, "Run the sound on a thread (independent of mix)" );
+ConVar host_threaded_sound_simplethread( "host_threaded_sound_simplethread", ( IsPS3()) ? "1" : "0", FCVAR_NONE, "Run the sound on a simple thread not a jobthread" );
 extern ConVar threadpool_affinity;
 void OnChangeThreadAffinity( IConVar *var, const char *pOldValue, float flOldValue )
 {
@@ -470,7 +473,6 @@ void OnChangeThreadAffinity( IConVar *var, const char *pOldValue, float flOldVal
 
 ConVar threadpool_affinity( "threadpool_affinity", "1", 0, "Enable setting affinity", 0, 0, 0, 0, &OnChangeThreadAffinity );
 
-#if 0
 extern ConVar threadpool_reserve;
 CThreadEvent g_ReleaseThreadReservation( true );
 CInterlockedInt g_NumReservedThreads;
@@ -528,14 +530,16 @@ CON_COMMAND( threadpool_cycle_reserve, "Cycles threadpool reservation by powers 
 
 CON_COMMAND( thread_test_tslist, "" )
 {
-	int nTests = ( args.ArgC() == 1 ) ? 10000 : atoi( args.Arg( 1 ) );
-	RunTSListTests( nTests );
+	int nLengthList = ( args.ArgC() == 1 ) ? 1 : atoi( args.Arg( 1 ) );
+	int nTests = ( args.ArgC() == 2 ) ? 1 : atoi( args.Arg( 2 ) );
+	RunTSListTests( nLengthList, nTests );
 }
 
 CON_COMMAND( thread_test_tsqueue, "" )
 {
-	int nTests = ( args.ArgC() == 1 ) ? 10000 : atoi( args.Arg( 1 ) );
-	RunTSQueueTests( nTests );
+	int nLengthList = ( args.ArgC() < 2 ) ? 10000 : atoi( args.Arg( 1 ) );
+	int nTests = ( args.ArgC() < 3 ) ? 1 : atoi( args.Arg( 2 ) );
+	RunTSQueueTests( nLengthList, nTests );
 }
 
 CON_COMMAND( threadpool_run_tests, "" )
@@ -546,7 +550,6 @@ CON_COMMAND( threadpool_run_tests, "" )
 		RunThreadPoolTests();
 	}
 }
-#endif
 
 //-----------------------------------------------------------------------------
 
@@ -1819,7 +1822,6 @@ static ConCommand dti_flush( "dti_flush", DTI_Flush_f, "Write out the datatable 
 /*
 ==================
 Host_ShutdownServer
-
 This only happens at the end of a game, not between levels
 ==================
 */
@@ -1828,9 +1830,14 @@ void Host_ShutdownServer( void )
 	if ( !sv.IsActive() )
 		return;
 
-	Host_AllowQueuedMaterialSystem( false );
+	if ( IGameEvent *event = g_GameEventManager.CreateEvent( "server_pre_shutdown" ) )
+	{
+		event->SetString( "reason", "restart" );
+		g_GameEventManager.FireEvent( event );
+	}
+
 	// clear structures
-#if !defined( SWDS )
+#if !defined( DEDICATED )
 	g_pShadowMgr->LevelShutdown();
 #endif
 	StaticPropMgr()->LevelShutdown();
@@ -1839,9 +1846,15 @@ void Host_ShutdownServer( void )
 	sv.Shutdown();// sv.Shutdown() references some heap memory, so run it before Host_FreeToLowMark()
 	Host_FreeToLowMark( true ); 
 
-	IGameEvent *event = g_GameEventManager.CreateEvent( "server_shutdown" );
+// #if defined( REPLAY_ENABLED )
+// 	if ( g_pServerReplayHistoryManager )
+// 	{
+// 		g_pServerReplayHistoryManager->Shutdown();
+// 		g_pServerReplayHistoryManager = NULL;
+// 	}
+// #endif
 
-	if ( event )
+	if ( IGameEvent *event = g_GameEventManager.CreateEvent( "server_shutdown" ) )
 	{
 		event->SetString( "reason", "restart" );
 		g_GameEventManager.FireEvent( event );
@@ -2258,13 +2271,15 @@ void Host_UpdateScreen( void )
 /*
 ====================
 Host_UpdateSounds
-
 Update sound subsystem and cd audio
 ====================
 */
 void Host_UpdateSounds( void )
 {
-#if !defined( SWDS )
+	VPROF("Host_UpdateSounds");
+
+#if !defined( DEDICATED )
+	MDLCACHE_COARSE_LOCK_(g_pMDLCache);
 	// update audio
 	if ( cl.IsActive() )
 	{
@@ -2909,18 +2924,95 @@ void CL_ApplyAddAngle()
 }
 #endif
 
+CJob *g_pSoundJob;
+bool g_bAllowThreadedSound;
+
 void _Host_RunFrame_Sound()
 {
-#ifndef SWDS
+#ifndef DEDICATED
+
+	if ( g_pSoundJob )
+	{
+		return;
+	}
 
 	VPROF_BUDGET( "_Host_RunFrame_Sound", VPROF_BUDGETGROUP_OTHER_SOUND );
 
 	g_HostTimes.StartFrameSegment( FRAME_SEGMENT_SOUND );
 
-	Host_UpdateSounds();
+	if ( !host_threaded_sound.GetBool() || !g_bAllowThreadedSound )
+	{
+		Host_UpdateSounds();
+	}
 
 	g_HostTimes.EndFrameSegment( FRAME_SEGMENT_SOUND );
 #endif
+}
+
+void Host_BeginThreadedSound()
+{
+#ifndef DEDICATED
+#ifdef _PS3
+
+	if (sv.IsActive())
+	{
+		Host_UpdateSounds();
+		g_pSoundJob = NULL;
+		return;
+	}
+	else if(host_threaded_sound_simplethread.GetBool())
+	{
+		SNPROF("Kick Sound");
+		g_pGcmSharedData->RunAudio(Host_UpdateSounds);
+		g_pSoundJob = (CJob*)1;
+		return;
+	}
+
+#endif
+
+	if ( !host_threaded_sound.GetBool() || !g_bAllowThreadedSound )
+	{
+		return;
+	}
+
+	g_pSoundJob = new CFunctorJob( CreateFunctor( Host_UpdateSounds ) );
+
+	IThreadPool *pSoundThreadPool;
+#ifdef _X360
+	pSoundThreadPool = g_pAlternateThreadPool;
+#else
+	pSoundThreadPool = g_pThreadPool;
+#endif
+	if ( IsX360() )
+	{
+		g_pSoundJob->SetServiceThread( g_nServerThread );
+	}
+	pSoundThreadPool->AddJob( g_pSoundJob );
+#endif
+}
+
+void Host_EndThreadedSound()
+{
+	if ( !g_pSoundJob )
+	{
+		return;
+	}
+
+#ifdef _PS3
+
+	if(host_threaded_sound_simplethread.GetBool())
+	{
+		SNPROF("Wait for Sound");
+		g_pGcmSharedData->WaitForAudio();
+		g_pSoundJob = NULL;
+		return;
+	}
+
+#endif
+
+	VPROF_BUDGET( "_Host_RunFrame_Sound", VPROF_BUDGETGROUP_OTHER_SOUND );
+	g_pSoundJob->WaitForFinishAndRelease();
+	g_pSoundJob = NULL;
 }
 
 float Host_GetSoundDuration( const char *pSample )
@@ -4105,6 +4197,55 @@ bool DLL_LOCAL Host_IsSecureServerAllowed()
 	return g_bAllowSecureServers;
 }
 
+bool Should360EmulatePS3()
+{
+	return ( IsX360() && CommandLine()->FindParm( "-ps3" ) ); 
+}
+
+static bool s_bDedicatedForPurposesOfThreadPool = false;
+
+void GetThreadPoolStartParams( ThreadPoolStartParams_t &startParams )
+{
+	if ( IsX360() )
+	{
+		// 360 overrides defaults, 2 computation threads distributed to core 1 and 2
+		if ( !Should360EmulatePS3() )
+		{
+			startParams.nThreads = 2;
+			startParams.nStackSize = 256 * 1024;
+			startParams.fDistribute = TRS_TRUE;
+			startParams.bUseAffinityTable = true;
+			startParams.iAffinityTable[ 0 ] = XBOX_PROCESSOR_2;
+			startParams.iAffinityTable[ 1 ] = XBOX_PROCESSOR_4;
+		}
+		else
+		{
+			startParams.nThreads = 1;
+			startParams.nStackSize = 256 * 1024;
+			startParams.fDistribute = TRS_TRUE;
+			startParams.bUseAffinityTable = true;
+			startParams.iAffinityTable[ 0 ] = XBOX_PROCESSOR_1;
+
+			ConVarRef cl_threaded_bone_setup( "cl_threaded_bone_setup" );
+			host_threaded_sound.SetValue( 0 );
+			cl_threaded_bone_setup.SetValue( 2 );
+			host_thread_mode.SetValue( 0 );
+			Cbuf_AddText( "cache_gimp\n" );
+			g_nMaterialSystemThread = 0;
+		}
+		ThreadSetAffinity( NULL, 1 );
+	}
+
+	// Dedicated servers should not explicitly set the main thread's affinity so that machines running multiple 
+	// copies of the dedicated server can load-balance properly. 
+	// For now on the PC we use SetThreadIdealProcessor instead of explicity affinity
+	if ( !s_bDedicatedForPurposesOfThreadPool && IsPC() )
+	{
+		// this will set ideal processor on each thread
+		startParams.fDistribute = TRS_TRUE;
+	}
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: 
 //-----------------------------------------------------------------------------
@@ -4131,19 +4272,59 @@ void Host_Init( bool bDedicated )
 	}
 
 	ThreadPoolStartParams_t startParams;
-	if ( IsX360() )
+	s_bDedicatedForPurposesOfThreadPool = bDedicated;
+	GetThreadPoolStartParams( startParams );
+#ifdef _PS3	
 	{
-		// 360 overrides defaults, 2 computation threads distributed to core 1 and 2
-		startParams.nThreads = 2;
-		startParams.nStackSize = 256*1024;
-		startParams.fDistribute = TRS_TRUE;
-		startParams.bUseAffinityTable = true;
-		startParams.iAffinityTable[0] = XBOX_PROCESSOR_2;
-		startParams.iAffinityTable[1] = XBOX_PROCESSOR_4;
-		ThreadSetAffinity( NULL, 1 );
+		// PS3 overrides defaults, 
+		if ( host_threaded_sound.GetBool() && ( !host_threaded_sound_simplethread.GetBool() ) )
+		{
+			startParams.nThreads = 1;
+		}
+		else
+		{
+			startParams.nThreads = 0;
+		}
+
+		// Second thread for CSGO, which is not a jobthread, so that we can more easily control "what runs where and whem"
+		g_pGcmSharedData->Init();
+		CreateQMSServerThread();
 	}
+#endif
+
+	//////// DISABLE FOR SHIP! //////////
+	// if ( !IsCert() || CommandLine()->FindParm( "-dbginput" ) )
+	// {
+	// 	g_pDebugInputThread = new CDebugInputThread();
+	// 	g_pDebugInputThread->SetName( "Debug Input" );
+	// 	g_pDebugInputThread->Start( 0, TP_PRIORITY_HIGH );
+	// }
+
+#ifndef _CERT
+	if ( CommandLine()->FindParm( "-tslist" ) )
+	{
+		int nTests = 10000;
+		Msg( "Running TSList tests\n" );
+		RunTSListTests( nTests );
+		Msg( "Running TSQueue tests\n" );
+		RunTSQueueTests( nTests );
+		Msg( "Running Thread Pool tests\n" );
+		RunThreadPoolTests();
+	}
+#endif
 	if ( g_pThreadPool )
-		g_pThreadPool->Start( startParams, "CmpJob" );
+	{
+		g_pThreadPool->Start( startParams );
+#ifdef _X360
+		if ( !Should360EmulatePS3() )
+		{
+			g_pAlternateThreadPool = CreateNewThreadPool();
+			startParams.iAffinityTable[0] = XBOX_PROCESSOR_3;
+			startParams.iAffinityTable[1] = XBOX_PROCESSOR_5;
+			g_pAlternateThreadPool->Start( startParams );
+		}
+#endif
+	}
 
 	// From const.h, the loaded game .dll will give us the correct value which is transmitted to the client
 	host_state.interval_per_tick = DEFAULT_TICK_INTERVAL;
@@ -4444,6 +4625,41 @@ void AddTransitionResources( CSaveRestoreData *pSaveData, const char *pLevelName
 	}
 }
 
+void AdjustThreadPoolThreadCount()
+{
+#if defined(DEDICATED) && IsLinux()
+	extern ConVar occlusion_test_async;
+	int nTargetThreads = occlusion_test_async.GetInt();
+	if ( nTargetThreads != g_pThreadPool->NumThreads() )
+	{
+		uint64 nTickStart = GetTimebaseRegister();
+		Msg( "Stopping %d worker threads\n", g_pThreadPool->NumThreads() );
+		g_pThreadPool->ExecuteAll();
+		g_pThreadPool->Stop();
+
+		if ( nTargetThreads != 0 )
+		{
+			Msg( "Starting %d worker threads\n", nTargetThreads);
+			ThreadPoolStartParams_t startParams;
+			GetThreadPoolStartParams( startParams );
+			startParams.nThreads = Max( 1, Min( 4, nTargetThreads ) );
+			startParams.bEnableOnLinuxDedicatedServer = true; // if we run with -threads parameter, we should also enable the thread pool
+			if ( g_pThreadPool )
+			{
+				g_pThreadPool->Start( startParams );
+			}
+		}
+		uint64 nTickEnd = GetTimebaseRegister();
+		Msg( "%d threads. %s ticks\n", g_pThreadPool->NumThreads(), V_pretifynum( nTickEnd - nTickStart ) );
+		int nCmdLineThreads = CommandLine()->ParmValue( "-threads", -1 );
+		if ( nCmdLineThreads >= 0 )
+		{
+			Msg( "Note that cmd line -threads %d is specified\n", nCmdLineThreads );
+		}
+	}
+#endif
+}
+
 bool Host_Changelevel( bool loadfromsavedgame, const char *mapname, const char *start )
 {
 	char			_startspot[MAX_QPATH];
@@ -4663,6 +4879,8 @@ bool Host_Changelevel( bool loadfromsavedgame, const char *mapname, const char *
 	NotifyDedicatedServerUI("UpdateMap");
 
 	DownloadListGenerator().OnLevelLoadEnd();
+
+	AdjustThreadPoolThreadCount();
 
 	return true;
 }
@@ -5057,7 +5275,7 @@ void Host_Shutdown(void)
 bool Host_AllowQueuedMaterialSystem( bool bAllow )
 {
 #if !defined DEDICATED
-	// g_bAllowThreadedSound = bAllow;
+	g_bAllowThreadedSound = bAllow;
 	// NOTE: Moved this to materialsystem for integrating with other mqm changes
 	return g_pMaterialSystem->AllowThreading( bAllow, g_nMaterialSystemThread );
 #else

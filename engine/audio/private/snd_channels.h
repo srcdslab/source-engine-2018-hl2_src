@@ -191,6 +191,12 @@ inline void CChannelList::RemoveChannelFromList( int listIndex )
 	}
 }
 
+struct activethreadsound_t
+{
+	int m_nGuid;
+	float m_flElapsedTime;
+};
+
 class CActiveChannels
 {
 public:
@@ -198,6 +204,8 @@ public:
 	void Remove( channel_t *pChannel );
 
 	void GetActiveChannels( CChannelList &list );
+	void CopyActiveSounds( CUtlVector<activethreadsound_t> &list ) const;
+	channel_t * FindActiveChannelByGuid( int guid ) const;
 
 	void Init();
 	int	 GetActiveCount() { return m_count; }
