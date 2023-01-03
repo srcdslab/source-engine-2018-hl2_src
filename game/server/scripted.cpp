@@ -1395,10 +1395,11 @@ void CAI_ScriptedSequence::DelayStart( bool bDelay )
 		if ( FClassnameIs( pentCine, "scripted_sequence" ) )
 		{
 			CAI_ScriptedSequence *pTarget = (CAI_ScriptedSequence *)pentCine;
+			// dimhotepus: Should not change delay for itself.
 			if (bDelay)
 			{
 				// if delaying, add up the number of other scripts in the group
-				m_iDelay++;
+				/*if ( pTarget != this )*/ m_iDelay++;
 
 				//Msg("SSEQ: (%d) Found matching SS (%d). Incrementing MY m_iDelay to %d.\n", entindex(), pTarget->entindex(), m_iDelay );
 			}
@@ -1998,7 +1999,7 @@ bool CAI_ScriptedSentence::KeyValue( const char *szKeyName, const char *szValue 
 {
 	if(FStrEq(szKeyName, "volume"))
 	{
-		m_flVolume = atof( szValue ) * 0.1;
+		m_flVolume = strtof( szValue, nullptr ) * 0.1F;
 	}
 	else
 	{
@@ -2083,7 +2084,7 @@ void CAI_ScriptedSentence::FindThink( void )
 		if ( m_spawnflags & SF_SENTENCE_ONCE )
 			UTIL_Remove( this );
 		
-		float delay = m_flDelay + length + 0.1;
+		float delay = m_flDelay + length + 0.1F;
 		if ( delay < 0 )
 			delay = 0;
 

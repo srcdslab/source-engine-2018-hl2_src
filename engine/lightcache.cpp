@@ -2098,7 +2098,7 @@ static void BuildStaticLightingCacheLightStyleInfo( PropLightcache_t* pcache, co
 {
 	const byte *pVis = NULL;
 	Assert( pcache->m_LightStyleWorldLights.Count() == 0 );
-	pcache->m_LightingFlags &= ~( HACKLIGHTCACHEFLAGS_HASSWITCHABLELIGHTSTYLE | HACKLIGHTCACHEFLAGS_HASSWITCHABLELIGHTSTYLE );
+	pcache->m_LightingFlags &= ~( HACKLIGHTCACHEFLAGS_HASSWITCHABLELIGHTSTYLE | HACKLIGHTCACHEFLAGS_HASNONSWITCHABLELIGHTSTYLE );
 	// clear lightstyles
 	memset( pcache->m_pLightstyles, 0, MAX_LIGHTSTYLE_BYTES );
 	for ( short i = 0; i < host_state.worldbrush->numworldlights; ++i)

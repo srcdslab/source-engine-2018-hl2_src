@@ -1772,10 +1772,15 @@ bool CResponseSystem::FindBestResponse( const AI_CriteriaSet& set, AI_Response& 
 		context = r->GetContext();
 		bcontexttoworld = r->IsApplyContextToWorld();
 
-		valid = true;
+		// dimhotepus: Only named response is valid one.
+		valid = !!responseName[0];
 	}
 
-	response.Init( responseType, responseName, set, rp, ruleName, context, bcontexttoworld );
+	// dimhotepus: Only valid response should be initialized, or we leak previous set.
+	if ( valid )
+	{
+		response.Init( responseType, responseName, set, rp, ruleName, context, bcontexttoworld );
+	}
 
 	if ( showResult )
 	{
@@ -1854,7 +1859,7 @@ void CResponseSystem::Precache()
 					if ( gender )
 					{
 						// replace with male & female
-						const char *postGender = gender + strlen("$gender");
+						const char *postGender = gender + std::size("$gender") - 1;
 						*gender = 0;
 						char genderFile[_MAX_PATH];
 						// male

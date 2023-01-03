@@ -58,7 +58,7 @@ static ConVar scene_maxcaptionradius( "scene_maxcaptionradius", "1200", 0, "Only
 #define SOUND_SYSTEM_LATENCY_DEFAULT ( 0.1f )
 
 // Think every 50 msec (FIXME: Try 10hz?)
-#define SCENE_THINK_INTERVAL 0.001 // FIXME: make scene's think in concert with their npc's	
+#define SCENE_THINK_INTERVAL 0.001F // FIXME: make scene's think in concert with their npc's	
 
 #define FINDNAMEDENTITY_MAX_ENTITIES	32		// max number of entities to be considered for random entity selection in FindNamedEntity
 
@@ -1336,7 +1336,7 @@ void CSceneEntity::DispatchProcessLoop( CChoreoScene *scene, CChoreoEvent *event
 	}
 
 	// dimhotepus: Some loops has zero length in data, no sense in such loops.
-	if ( !process || backtime == 0.0F )
+	if ( !process /* || backtime == 0.0F*/ )
 		return;
 
 	scene->LoopToTime( backtime );
@@ -2910,13 +2910,13 @@ void CSceneEntity::StartEvent( float currenttime, CChoreoScene *scene, CChoreoEv
 			// FIXME: make sure moveto's aren't edge triggered
 			if ( !event->HasEndTime() )
 			{
-				event->SetEndTime( event->GetStartTime() + 1.0 );
+				event->SetEndTime( event->GetStartTime() + 1.0F );
 			}
 
 			if ( pActor && !IsMultiplayer() )
 			{
 				CBaseEntity *pActor2 = NULL;
-				if ( event->GetParameters3( ) && strlen( event->GetParameters3( ) ) > 0 )
+				if ( event->GetParameters3( ) && event->GetParameters3( )[0] )
 				{
 					pActor2 = FindNamedEntityClosest( event->GetParameters( ), pActor, false, true, event->GetParameters3( ) );
 				}
@@ -3619,9 +3619,8 @@ class CSceneFindNearestMarkFilter : public IEntityFindFilter
 public:
 
 	CSceneFindNearestMarkFilter( const CBaseEntity *pActor, const Vector &vecPos2, float flMaxRadius = MAX_TRACE_LENGTH )
+     : m_vecPos2(vecPos2)
 	{
-		m_vecPos2 = vecPos2;
-
 		m_flMaxSegmentDistance = flMaxRadius;
 
 		m_flNearestToTarget = flMaxRadius;
@@ -3633,8 +3632,8 @@ public:
 		if (pActor)
 		{
 			m_vecPos1 = pActor->GetAbsOrigin();
-			m_flMaxSegmentDistance = MIN( flMaxRadius, (m_vecPos1 - m_vecPos2).Length() + 1.0 );
-			if (m_flMaxSegmentDistance <= 1.0)
+			m_flMaxSegmentDistance = MIN( flMaxRadius, (m_vecPos1 - m_vecPos2).Length() + 1.0F );
+			if (m_flMaxSegmentDistance <= 1.0F)
 			{
 				// must be closest to self
 				m_flMaxSegmentDistance = MIN( flMaxRadius, MAX_TRACE_LENGTH );
@@ -3874,7 +3873,7 @@ CBaseEntity *CSceneEntity::FindNamedEntityClosest( const char *name, CBaseEntity
 
 	if (pActor && pActor->MyNPCPointer())
 	{
-		if (pszSecondary && strlen( pszSecondary ) > 0)
+		if (pszSecondary && pszSecondary[0])
 		{
 			CBaseEntity *pActor2 = FindNamedEntityClosest( pszSecondary, pActor, false, false, NULL );
 
@@ -4830,7 +4829,7 @@ void CSceneManager::Think()
 	// The manager is always thinking at 20 hz
 	SetNextThink( gpGlobals->curtime + SCENE_THINK_INTERVAL );
 	float frameTime = ( gpGlobals->curtime - GetLastThink() );
-	frameTime = MIN( 0.1, frameTime );
+	frameTime = MIN( 0.1F, frameTime );
 
 	// stop if AI is diabled
 	if (CAI_BaseNPC::m_nDebugBits & bits_debugDisableAI)

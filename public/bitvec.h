@@ -199,7 +199,8 @@ inline int GetBitForBitnumByte( int bitNum )
 	return bitsForBitnum[ bitNum & 7 ]; 
 }
 
-inline int CalcNumIntsForBits( int numBits )	{ return (numBits + (BITS_PER_INT-1)) / BITS_PER_INT; }
+template<typename I>
+inline I CalcNumIntsForBits( I numBits )	{ return (numBits + (BITS_PER_INT-1)) / BITS_PER_INT; }
 
 #ifdef _X360
 #define BitVec_Bit( bitNum ) GetBitForBitnum( bitNum )
@@ -226,7 +227,7 @@ class CBitVecT : public BASE_OPS
 {
 public:
 	CBitVecT();
-	CBitVecT(int numBits);			// Must be initialized with the number of bits
+	CBitVecT(typename BASE_OPS::CountType numBits);			// Must be initialized with the number of bits
 
 	void	Init(int val = 0);
 
@@ -280,6 +281,8 @@ template <typename BITCOUNTTYPE>
 class CVarBitVecBase
 {
 public:
+	using CountType  = BITCOUNTTYPE;
+
 	bool	IsFixedSize() const			{ return false; }
 	int		GetNumBits(void) const		{ return m_numBits; }
 	void	Resize( int numBits, bool bClearAll = false );		// resizes bit array
@@ -288,14 +291,14 @@ public:
 	uint32 *Base()						{ return m_pInt;	}
 	const uint32 *Base() const			{ return m_pInt;	}
 
-	void Attach( uint32 *pBits, int numBits );
+	void Attach( uint32 *pBits, BITCOUNTTYPE numBits );
 	bool Detach( uint32 **ppBits, int *pNumBits );
 
 	int		FindNextSetBit(int iStartBit) const; // returns -1 if no set bit was found
 
 protected:
 	CVarBitVecBase();
-	CVarBitVecBase(int numBits);
+	CVarBitVecBase(BITCOUNTTYPE numBits);
 	CVarBitVecBase( const CVarBitVecBase<BITCOUNTTYPE> &from );
 	CVarBitVecBase &operator=( const CVarBitVecBase<BITCOUNTTYPE> &from );
 	~CVarBitVecBase(void);
@@ -362,6 +365,8 @@ template <int NUM_BITS>
 class CFixedBitVecBase
 {
 public:
+	using CountType = decltype(NUM_BITS);
+
 	bool	IsFixedSize() const								{ return true; }
 	int		GetNumBits(void) const							{ return NUM_BITS; }
 	void	Resize( int numBits, bool bClearAll = false )	{ Assert(numBits == NUM_BITS); if ( bClearAll ) Plat_FastMemset( m_Ints, 0, NUM_INTS * sizeof(uint32) ); }// for syntatic consistency (for when using templates)
@@ -403,7 +408,7 @@ public:
 	{
 	}
 	
-	CVarBitVec(int numBits)
+	CVarBitVec(unsigned short numBits)
 	 : CBitVecT< CVarBitVecBase<unsigned short> >(numBits)
 	{
 	}
@@ -452,13 +457,14 @@ inline CVarBitVecBase<BITCOUNTTYPE>::CVarBitVecBase()
 //-----------------------------------------------------------------------------
 
 template <typename BITCOUNTTYPE>
-inline CVarBitVecBase<BITCOUNTTYPE>::CVarBitVecBase(int numBits)
+inline CVarBitVecBase<BITCOUNTTYPE>::CVarBitVecBase(BITCOUNTTYPE numBits)
 {
 	Assert( numBits );
 	m_numBits	= numBits;
 
 	// Figure out how many ints are needed
 	m_numInts = CalcNumIntsForBits( numBits );
+	m_iBitStringStorage = 0;
 	m_pInt = NULL;
 	AllocInts( m_numInts );
 }
@@ -506,7 +512,7 @@ inline CVarBitVecBase<BITCOUNTTYPE>::~CVarBitVecBase(void)
 //-----------------------------------------------------------------------------
 
 template <typename BITCOUNTTYPE>
-inline void CVarBitVecBase<BITCOUNTTYPE>::Attach( uint32 *pBits, int numBits )
+inline void CVarBitVecBase<BITCOUNTTYPE>::Attach( uint32 *pBits, BITCOUNTTYPE numBits )
 {
 	FreeInts();
 	m_numBits = numBits;
@@ -565,7 +571,7 @@ inline CBitVecT<BASE_OPS>::CBitVecT()
 
 //-----------------------------------------------------------------------------
 template <class BASE_OPS>
-inline CBitVecT<BASE_OPS>::CBitVecT(int numBits)
+inline CBitVecT<BASE_OPS>::CBitVecT(typename BASE_OPS::CountType numBits)
  : BASE_OPS( numBits )
 {
 	// undef this is ints are not 4 bytes

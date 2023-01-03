@@ -230,9 +230,9 @@ void FX_TracerSound( const Vector &start, const Vector &end, int iTracerType )
 			listener.Init( vecListenOrigin,	vecLower );
 
 			float s, t;
-			IntersectRayWithRay( bullet, listener, s, t );
-			t = clamp( t, 0.f, 1.f );
-			vecListenOrigin.z -= t * LISTENER_HEIGHT;
+			IntersectRayWithRay( bullet, listener, t, s );
+			s = clamp( s, 0.f, 1.f );
+			vecListenOrigin.z -= s * LISTENER_HEIGHT;
 		}
 		break;
 

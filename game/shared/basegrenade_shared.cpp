@@ -42,6 +42,9 @@ BEGIN_DATADESC( CBaseGrenade )
 	DEFINE_FIELD( m_bHasWarnedAI,	FIELD_BOOLEAN ),
 
 	// Function Pointers
+	// dimhotepus: Add missed function from base class.
+	// Allows to collide with teammates in a different way.
+	DEFINE_THINKFUNC( CollideWithTeammatesThink ),
 	DEFINE_THINKFUNC( Smoke ),
 	DEFINE_ENTITYFUNC( BounceTouch ),
 	DEFINE_ENTITYFUNC( SlideTouch ),
